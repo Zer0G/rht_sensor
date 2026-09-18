@@ -1,0 +1,7 @@
+/build/
+/managed_components/
+/sdkconfig
+/sdkconfig.old
+/tmp/
+__pycache__/
+*.py[cod]

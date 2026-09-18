@@ -1,0 +1,66 @@
+menu "RHT sensor configuration"
+
+config RHT_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+
+config RHT_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+
+config RHT_MQTT_URI
+    string "MQTT broker URI"
+    default "mqtt://192.168.1.2:1883"
+
+config RHT_MQTT_USERNAME
+    string "MQTT username"
+    default ""
+
+config RHT_MQTT_PASSWORD
+    string "MQTT password"
+    default ""
+
+config RHT_MQTT_BASE_TOPIC
+    string "MQTT base topic"
+    default "homeassistant/sensor/rht_epaper"
+
+config RHT_DEVICE_ID
+    string "Home Assistant device id"
+    default "rht_epaper"
+
+config RHT_NTP_SERVER
+    string "NTP server"
+    default "pool.ntp.org"
+
+config RHT_TIMEZONE
+    string "POSIX timezone"
+    default "CET-1CEST,M3.5.0,M10.5.0/3"
+
+config RHT_SAMPLE_INTERVAL_SECONDS
+    int "Wake/sample interval in seconds"
+    range 60 120
+    default 60
+
+config RHT_DEEP_SLEEP
+    bool "Enable deep sleep between samples"
+    default n
+    help
+        Enable this for battery-powered production use. Keep it disabled while
+        developing so the native USB serial port remains connected.
+
+config RHT_TX_DELTA_C_X100
+    int "Temperature delta that triggers MQTT, hundredths C"
+    range 1 1000
+    default 50
+
+config RHT_TEMP_OFFSET_C_X100
+    int "SHTC3 temperature calibration offset, hundredths C"
+    range -1000 1000
+    default -600
+
+config RHT_NTP_RESYNC_HOURS
+    int "Maximum interval between NTP synchronizations"
+    range 1 168
+    default 24
+
+endmenu
