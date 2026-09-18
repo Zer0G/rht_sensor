@@ -14,6 +14,7 @@
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 #include "mqtt_client.h"
+#include "nvs.h"
 #include "sdkconfig.h"
 
 #define WIFI_CONNECTED_BIT BIT0
@@ -29,6 +30,10 @@ static esp_event_handler_instance_t s_wifi_handler;
 static esp_event_handler_instance_t s_ip_handler;
 static int s_wifi_retries;
 static volatile int s_last_published_id;
+
+#define WIFI_NVS_NAMESPACE "rht_wifi"
+#define WIFI_NVS_SSID_KEY  "ssid"
+#define WIFI_NVS_PASS_KEY  "password"
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -48,14 +53,72 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
+bool network_get_wifi_credentials(char *ssid, size_t ssid_size,
+                                  char *password, size_t password_size)
+{
+    if (!ssid || ssid_size == 0 || !password || password_size == 0) {
+        return false;
+    }
+    ssid[0] = '\0';
+    password[0] = '\0';
+
+    nvs_handle_t nvs;
+    if (nvs_open(WIFI_NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        size_t stored_ssid_size = ssid_size;
+        size_t stored_password_size = password_size;
+        const esp_err_t ssid_result = nvs_get_str(nvs, WIFI_NVS_SSID_KEY,
+                                                  ssid, &stored_ssid_size);
+        const esp_err_t password_result = nvs_get_str(nvs, WIFI_NVS_PASS_KEY,
+                                                      password, &stored_password_size);
+        nvs_close(nvs);
+        if (ssid_result == ESP_OK && password_result == ESP_OK && ssid[0]) {
+            return true;
+        }
+        ssid[0] = '\0';
+        password[0] = '\0';
+    }
+
+    strlcpy(ssid, CONFIG_RHT_WIFI_SSID, ssid_size);
+    strlcpy(password, CONFIG_RHT_WIFI_PASSWORD, password_size);
+    return ssid[0] != '\0';
+}
+
+esp_err_t network_save_wifi_credentials(const char *ssid, const char *password)
+{
+    if (!ssid || !ssid[0] || strlen(ssid) > 32 || !password || strlen(password) > 64) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t nvs;
+    ESP_RETURN_ON_ERROR(nvs_open(WIFI_NVS_NAMESPACE, NVS_READWRITE, &nvs),
+                        TAG, "open Wi-Fi NVS");
+    esp_err_t result = nvs_set_str(nvs, WIFI_NVS_SSID_KEY, ssid);
+    if (result == ESP_OK) {
+        result = nvs_set_str(nvs, WIFI_NVS_PASS_KEY, password);
+    }
+    if (result == ESP_OK) {
+        result = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    return result;
+}
+
+bool network_has_wifi_credentials(void)
+{
+    char ssid[33];
+    char password[65];
+    return network_get_wifi_credentials(ssid, sizeof(ssid), password, sizeof(password));
+}
+
 bool network_is_configured(void)
 {
-    return CONFIG_RHT_WIFI_SSID[0] != '\0' && CONFIG_RHT_MQTT_URI[0] != '\0';
+    return network_has_wifi_credentials() && CONFIG_RHT_MQTT_URI[0] != '\0';
 }
 
 esp_err_t network_connect(int8_t *rssi)
 {
-    if (CONFIG_RHT_WIFI_SSID[0] == '\0') {
+    char ssid[33];
+    char password[65];
+    if (!network_get_wifi_credentials(ssid, sizeof(ssid), password, sizeof(password))) {
         ESP_LOGW(TAG, "Wi-Fi SSID is empty");
         return ESP_ERR_INVALID_STATE;
     }
@@ -84,9 +147,9 @@ esp_err_t network_connect(int8_t *rssi)
                                                        wifi_event, NULL, &s_ip_handler)) != ESP_OK) goto fail;
 
     wifi_config_t config = {0};
-    strlcpy((char *)config.sta.ssid, CONFIG_RHT_WIFI_SSID, sizeof(config.sta.ssid));
-    strlcpy((char *)config.sta.password, CONFIG_RHT_WIFI_PASSWORD, sizeof(config.sta.password));
-    config.sta.threshold.authmode = CONFIG_RHT_WIFI_PASSWORD[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+    memcpy(config.sta.ssid, ssid, strlen(ssid));
+    memcpy(config.sta.password, password, strlen(password));
+    config.sta.threshold.authmode = password[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
     config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
     if ((result = esp_wifi_set_mode(WIFI_MODE_STA)) != ESP_OK) goto fail;
     if ((result = esp_wifi_set_config(WIFI_IF_STA, &config)) != ESP_OK) goto fail;

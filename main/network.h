@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <time.h>
 
@@ -21,5 +22,9 @@ typedef struct {
 esp_err_t network_connect(int8_t *rssi);
 esp_err_t network_sync_time(void);
 esp_err_t network_publish(const network_measurement_t *measurement, bool send_discovery);
+esp_err_t network_save_wifi_credentials(const char *ssid, const char *password);
+bool network_get_wifi_credentials(char *ssid, size_t ssid_size,
+                                  char *password, size_t password_size);
 void network_disconnect(void);
+bool network_has_wifi_credentials(void);
 bool network_is_configured(void);

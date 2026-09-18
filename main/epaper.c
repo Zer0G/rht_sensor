@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "qrcode.h"
 
 #define EPD_WIDTH       200
 #define EPD_HEIGHT      200
@@ -425,11 +426,8 @@ static void render(const epaper_view_t *view)
     history_chart(view->chart_values, view->chart_count);
 }
 
-esp_err_t epaper_show(const epaper_view_t *view)
+static esp_err_t prepare_display(void)
 {
-    if (!view) {
-        return ESP_ERR_INVALID_ARG;
-    }
     ESP_RETURN_ON_ERROR(board_epaper_power(true), TAG, "display power");
     vTaskDelay(pdMS_TO_TICKS(10));
 
@@ -470,12 +468,76 @@ esp_err_t epaper_show(const epaper_view_t *view)
     }
 
     ESP_RETURN_ON_ERROR(controller_init(), TAG, "controller init");
-    ESP_RETURN_ON_ERROR(clear_panel_to_white(), TAG, "anti-ghost clear");
-    render(view);
+    return clear_panel_to_white();
+}
+
+static esp_err_t present_framebuffer(void)
+{
     ESP_RETURN_ON_ERROR(set_window_and_cursor(), TAG, "set cursor");
     ESP_RETURN_ON_ERROR(send_command(0x24), TAG, "write RAM cmd");
     ESP_RETURN_ON_ERROR(send_data(s_framebuffer, sizeof(s_framebuffer)), TAG, "write RAM");
     return activate_full_refresh();
+}
+
+esp_err_t epaper_show(const epaper_view_t *view)
+{
+    if (!view) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ESP_RETURN_ON_ERROR(prepare_display(), TAG, "display init");
+    render(view);
+    return present_framebuffer();
+}
+
+static void provisioning_qr(esp_qrcode_handle_t qrcode)
+{
+    const int size = esp_qrcode_get_size(qrcode);
+    const int quiet_modules = 4;
+    const int available = 150;
+    int scale = available / (size + quiet_modules * 2);
+    if (scale > 5) scale = 5;
+    if (scale < 2) scale = 2;
+    const int total = (size + quiet_modules * 2) * scale;
+    const int origin_x = (EPD_WIDTH - total) / 2 + quiet_modules * scale;
+    const int origin_y = 18 + (available - total) / 2 + quiet_modules * scale;
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            if (!esp_qrcode_get_module(qrcode, x, y)) continue;
+            for (int dy = 0; dy < scale; ++dy) {
+                for (int dx = 0; dx < scale; ++dx) {
+                    pixel(origin_x + x * scale + dx, origin_y + y * scale + dy, true);
+                }
+            }
+        }
+    }
+}
+
+esp_err_t epaper_show_provisioning(const char *ap_ssid, const char *ap_password)
+{
+    if (!ap_ssid || !ap_password) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    char qr_payload[96];
+    const int length = snprintf(qr_payload, sizeof(qr_payload),
+                                "WIFI:T:WPA;S:%s;P:%s;;", ap_ssid, ap_password);
+    if (length < 0 || length >= (int)sizeof(qr_payload)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    ESP_RETURN_ON_ERROR(prepare_display(), TAG, "display init");
+    memset(s_framebuffer, 0xff, sizeof(s_framebuffer));
+    text_centered(1, "WIFI SETUP", 1);
+    esp_qrcode_config_t config = ESP_QRCODE_CONFIG_DEFAULT();
+    config.display_func = provisioning_qr;
+    config.max_qrcode_version = 6;
+    config.qrcode_ecc_level = ESP_QRCODE_ECC_MED;
+    ESP_RETURN_ON_ERROR(esp_qrcode_generate(&config, qr_payload), TAG, "QR generation");
+    text_centered(171, ap_ssid, 1);
+    char password_line[28];
+    snprintf(password_line, sizeof(password_line), "PASS %s", ap_password);
+    text_centered(186, password_line, 1);
+
+    return present_framebuffer();
 }
 
 void epaper_shutdown(void)

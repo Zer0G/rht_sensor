@@ -18,6 +18,7 @@
 #include "freertos/task.h"
 #include "network.h"
 #include "nvs_flash.h"
+#include "provisioning.h"
 #include "sdkconfig.h"
 #include "stats.h"
 
@@ -27,6 +28,7 @@
 #define DEEP_SLEEP_WAKE_MASK (1ULL << BOARD_BUTTON_POWER_GPIO)
 #define BUTTON_DEBOUNCE_MS 30
 #define BUTTON_POLL_MS 20
+#define PROVISION_HOLD_MS 5000
 
 typedef struct {
     uint32_t magic;
@@ -112,6 +114,25 @@ static void refresh_delta_page(const epaper_view_t *base_view)
     epaper_shutdown();
 }
 
+static bool boot_button_held_for_provisioning(void)
+{
+    if (gpio_get_level(BOARD_BUTTON_BOOT_GPIO) != 0) {
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(BUTTON_DEBOUNCE_MS));
+    if (gpio_get_level(BOARD_BUTTON_BOOT_GPIO) != 0) {
+        return false;
+    }
+    const TickType_t started = xTaskGetTickCount();
+    while (gpio_get_level(BOARD_BUTTON_BOOT_GPIO) == 0) {
+        if ((xTaskGetTickCount() - started) >= pdMS_TO_TICKS(PROVISION_HOLD_MS)) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
+    }
+    return false;
+}
+
 static void wait_for_next_cycle(time_t now, const epaper_view_t *current_view)
 {
     epaper_shutdown();
@@ -145,18 +166,29 @@ static void wait_for_next_cycle(time_t now, const epaper_view_t *current_view)
     ESP_LOGI(TAG, "development mode: staying awake for %lu seconds; GP9 changes delta page",
              (unsigned long)sleep_seconds);
     const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(sleep_seconds * 1000U);
-    bool button_armed = true;
-    while ((int32_t)(deadline - xTaskGetTickCount()) > 0) {
+    bool button_pressed_before = false;
+    TickType_t pressed_since = 0;
+    while (button_pressed_before || (int32_t)(deadline - xTaskGetTickCount()) > 0) {
         const bool button_pressed = gpio_get_level(BOARD_BUTTON_BOOT_GPIO) == 0;
-        if (button_armed && button_pressed) {
+        if (button_pressed && !button_pressed_before) {
             vTaskDelay(pdMS_TO_TICKS(BUTTON_DEBOUNCE_MS));
             if (gpio_get_level(BOARD_BUTTON_BOOT_GPIO) == 0) {
-                s_state.page = (s_state.page + 1U) % 5U;
-                refresh_delta_page(current_view);
-                button_armed = false;
+                button_pressed_before = true;
+                pressed_since = xTaskGetTickCount();
             }
-        } else if (!button_pressed) {
-            button_armed = true;
+        } else if (button_pressed && button_pressed_before &&
+                   (xTaskGetTickCount() - pressed_since) >=
+                       pdMS_TO_TICKS(PROVISION_HOLD_MS)) {
+            ESP_LOGI(TAG, "GP9 held for five seconds: starting Wi-Fi provisioning");
+            ESP_ERROR_CHECK_WITHOUT_ABORT(provisioning_run());
+            while (gpio_get_level(BOARD_BUTTON_BOOT_GPIO) == 0) {
+                vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
+            }
+            return;
+        } else if (!button_pressed && button_pressed_before) {
+            s_state.page = (s_state.page + 1U) % 5U;
+            refresh_delta_page(current_view);
+            button_pressed_before = false;
         }
         vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
     }
@@ -203,6 +235,13 @@ void app_main(void)
         enter_startup_failure_sleep(board_result);
         return;
     }
+    if (boot_button_held_for_provisioning()) {
+        ESP_LOGI(TAG, "GP9 held during startup: starting Wi-Fi provisioning");
+        ESP_ERROR_CHECK_WITHOUT_ABORT(provisioning_run());
+        while (gpio_get_level(BOARD_BUTTON_BOOT_GPIO) == 0) {
+            vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
+        }
+    }
 
     while (true) {
     time_t now = 0;
@@ -230,7 +269,7 @@ void app_main(void)
                                  now - s_state.last_ntp_attempt >= NTP_RETRY_SECONDS;
     const bool ntp_due = ntp_resync_required && ntp_retry_ready;
 
-    if (ntp_due && CONFIG_RHT_WIFI_SSID[0]) {
+    if (ntp_due && network_has_wifi_credentials()) {
         wifi_attempted = true;
         if (time_valid) {
             s_state.last_ntp_attempt = now;

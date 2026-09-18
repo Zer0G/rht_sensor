@@ -5,6 +5,7 @@ idf_component_register(
         "epaper.c"
         "stats.c"
         "network.c"
+        "provisioning.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_adc
@@ -14,9 +15,11 @@ idf_component_register(
         esp_event
         esp_hw_support
         esp_netif
+        esp_http_server
         esp_partition
         esp_wifi
         lwip
         mqtt
         nvs_flash
+        qrcode
 )

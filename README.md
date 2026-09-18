@@ -12,6 +12,7 @@ Firmware ESP-IDF per la board Waveshare **ESP32-C6-ePaper-1.54**. Il dispositivo
 - RTC PCF85063 mantenuto in UTC e sincronizzato periodicamente via NTP;
 - wake-up da timer, tasto Power (GPIO2) e tasto BOOT (GPIO9);
 - rotazione della pagina delta a ogni wake-up temporizzato oppure premendo BOOT;
+- provisioning Wi-Fi tramite pressione di 5 secondi su BOOT, SoftAP, QR code e captive portal;
 - invio MQTT al primo campione di ogni ora o quando la temperatura cambia di oltre la soglia configurata;
 - auto-discovery Home Assistant per temperatura, umidità, punto di rugiada, minimo/massimo giornalieri, batteria, tensione e RSSI;
 - spegnimento delle alimentazioni commutate e deep sleep al termine del ciclo.
@@ -29,15 +30,24 @@ idf.py set-target esp32c6
 idf.py menuconfig
 ```
 
-Nel menu **RHT sensor configuration** impostare almeno:
+Nel menu **RHT sensor configuration** impostare:
 
-- SSID e password Wi-Fi;
 - URI, utente e password del broker MQTT;
 - fuso orario POSIX e server NTP;
 - intervallo di campionamento e soglia di trasmissione;
 - eventuale correzione di temperatura del sensore.
 
-Il valore predefinito del fuso è quello italiano con ora legale. Le credenziali finiscono nel file locale `sdkconfig`, escluso dal controllo versione.
+Il valore predefinito del fuso è quello italiano con ora legale.
+
+SSID e password Wi-Fi possono essere preconfigurati da menu oppure acquisiti dal
+portale di provisioning e salvati nella NVS. Per avviare il provisioning tenere
+premuto BOOT/GP9 per 5 secondi, scansionare il QR mostrato sull'e-paper e accettare
+la connessione alla rete `RHT-xxxxxx`. Il captive portal consente di inserire le
+credenziali della rete definitiva e le salva soltanto dopo aver verificato la
+connessione. La modalità termina dopo il salvataggio o dopo cinque minuti.
+
+I valori impostati da menu finiscono nel file locale `sdkconfig`, escluso dal
+controllo versione. Le credenziali ricevute dal portale hanno precedenza.
 
 Compilazione e programmazione:
 
