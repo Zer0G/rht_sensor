@@ -6,12 +6,14 @@ idf_component_register(
         "stats.c"
         "network.c"
         "provisioning.c"
+        "device_console.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_adc
         esp_driver_gpio
         esp_driver_i2c
         esp_driver_spi
+        esp_driver_usb_serial_jtag
         esp_event
         esp_hw_support
         esp_netif

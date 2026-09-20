@@ -6,7 +6,9 @@
 #include <time.h>
 
 #include "board.h"
+#include "device_console.h"
 #include "driver/gpio.h"
+#include "driver/usb_serial_jtag.h"
 #include "epaper.h"
 #include "esp_attr.h"
 #include "esp_check.h"
@@ -14,6 +16,7 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_sleep.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "network.h"
@@ -22,38 +25,35 @@
 #include "sdkconfig.h"
 #include "stats.h"
 
-#define STATE_MAGIC 0x52485435U
+#define STATE_MAGIC 0x52485438U
 #define NTP_RETRY_SECONDS (15 * 60)
 #define STARTUP_RETRY_SECONDS 60
 #define DEEP_SLEEP_WAKE_MASK (1ULL << BOARD_BUTTON_POWER_GPIO)
 #define BUTTON_DEBOUNCE_MS 30
 #define BUTTON_POLL_MS 20
 #define PROVISION_HOLD_MS 5000
+#define USB_CONSOLE_WINDOW_SECONDS 30
 
 typedef struct {
     uint32_t magic;
     stats_runtime_t stats;
-    float last_tx_temperature;
-    time_t last_tx_hour;
+    uint32_t samples_since_update;
     time_t last_ntp_sync;
     time_t last_ntp_attempt;
     time_t last_discovery;
     int8_t last_rssi;
     uint8_t page;
-    bool has_transmitted;
+    bool last_wifi_connected;
 } persistent_state_t;
 
 RTC_DATA_ATTR static persistent_state_t s_state;
 static const char *TAG = "rht_sensor";
 
-static time_t hour_start(time_t timestamp)
+static void provisioning_completed(void)
 {
-    struct tm local;
-    localtime_r(&timestamp, &local);
-    local.tm_min = 0;
-    local.tm_sec = 0;
-    local.tm_isdst = -1;
-    return mktime(&local);
+    s_state.last_discovery = 0;
+    s_state.samples_since_update = UINT32_MAX;
+    ESP_LOGI(TAG, "provisioning saved: MQTT update and Home Assistant discovery scheduled");
 }
 
 static float dew_point(float temperature, float humidity)
@@ -82,14 +82,6 @@ static bool is_time_valid(time_t value)
     return utc.tm_year + 1900 >= 2024;
 }
 
-static void rotate_page_for_wakeup(void)
-{
-    const uint32_t causes = esp_sleep_get_wakeup_causes();
-    if (causes & BIT(ESP_SLEEP_WAKEUP_TIMER)) {
-        s_state.page = (s_state.page + 1U) % 5U;
-    }
-}
-
 static void refresh_delta_page(const epaper_view_t *base_view)
 {
     if (!base_view) {
@@ -106,7 +98,7 @@ static void refresh_delta_page(const epaper_view_t *base_view)
     view.delta_label = delta_label;
     view.chart_count = stats_chart_series(&s_state.stats, s_state.page, view.timestamp,
                                           view.chart_values, EPAPER_CHART_MAX_POINTS);
-    view.wifi_connected = false;
+    view.wifi_connected = s_state.last_wifi_connected;
 
     ESP_LOGI(TAG, "GP9: delta page %u/5 (%s)",
              (unsigned)(s_state.page + 1U), delta_label);
@@ -137,17 +129,69 @@ static void wait_for_next_cycle(time_t now, const epaper_view_t *current_view)
 {
     epaper_shutdown();
     network_disconnect();
-    board_prepare_for_sleep();
 
-    const uint32_t interval = CONFIG_RHT_SAMPLE_INTERVAL_SECONDS;
+    const uint32_t interval = CONFIG_RHT_T_SAMPLE;
     uint32_t sleep_seconds = interval;
     if (is_time_valid(now)) {
         const uint32_t remainder = (uint32_t)(now % interval);
         sleep_seconds = remainder ? interval - remainder : interval;
     }
 
-#if CONFIG_RHT_DEEP_SLEEP
-    /* Avoid an immediate level-triggered wake while the user still holds a key. */
+    if (usb_serial_jtag_is_connected()) {
+        ESP_LOGI(TAG, "USB host connected: console available for %u seconds",
+                 USB_CONSOLE_WINDOW_SECONDS);
+        const TickType_t deadline =
+            xTaskGetTickCount() + pdMS_TO_TICKS(USB_CONSOLE_WINDOW_SECONDS * 1000U);
+        bool button_pressed_before = false;
+        TickType_t pressed_since = 0;
+        while (button_pressed_before || (int32_t)(deadline - xTaskGetTickCount()) > 0) {
+            if (gpio_get_level(BOARD_BUTTON_POWER_GPIO) == 0) {
+                ESP_LOGI(TAG, "POWER pressed: entering deep sleep");
+                while (gpio_get_level(BOARD_BUTTON_POWER_GPIO) == 0) {
+                    vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
+                }
+                break;
+            }
+            if (!usb_serial_jtag_is_connected() && !button_pressed_before) {
+                ESP_LOGI(TAG, "USB host disconnected: entering deep sleep");
+                break;
+            }
+            const bool button_pressed = gpio_get_level(BOARD_BUTTON_BOOT_GPIO) == 0;
+            if (button_pressed && !button_pressed_before) {
+                vTaskDelay(pdMS_TO_TICKS(BUTTON_DEBOUNCE_MS));
+                if (gpio_get_level(BOARD_BUTTON_BOOT_GPIO) == 0) {
+                    button_pressed_before = true;
+                    pressed_since = xTaskGetTickCount();
+                }
+            } else if (button_pressed && button_pressed_before &&
+                       (xTaskGetTickCount() - pressed_since) >=
+                           pdMS_TO_TICKS(PROVISION_HOLD_MS)) {
+                ESP_LOGI(TAG, "GP9 held for five seconds: starting Wi-Fi provisioning");
+                const esp_err_t result = provisioning_run();
+                if (result == ESP_OK) {
+                    provisioning_completed();
+                } else {
+                    ESP_ERROR_CHECK_WITHOUT_ABORT(result);
+                }
+                while (gpio_get_level(BOARD_BUTTON_BOOT_GPIO) == 0) {
+                    vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
+                }
+                return;
+            } else if (!button_pressed && button_pressed_before) {
+                s_state.page = (s_state.page + 1U) % 5U;
+                refresh_delta_page(current_view);
+                button_pressed_before = false;
+            }
+            vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
+        }
+        time(&now);
+        if (is_time_valid(now)) {
+            const uint32_t remainder = (uint32_t)(now % interval);
+            sleep_seconds = remainder ? interval - remainder : interval;
+        }
+    }
+
+    board_prepare_for_sleep();
     for (int i = 0; i < 30; ++i) {
         if (gpio_get_level(BOARD_BUTTON_BOOT_GPIO) && gpio_get_level(BOARD_BUTTON_POWER_GPIO)) {
             break;
@@ -162,74 +206,44 @@ static void wait_for_next_cycle(time_t now, const epaper_view_t *current_view)
     ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup_io(DEEP_SLEEP_WAKE_MASK,
                                                     ESP_EXT1_WAKEUP_ANY_LOW));
     esp_deep_sleep_start();
-#else
-    ESP_LOGI(TAG, "development mode: staying awake for %lu seconds; GP9 changes delta page",
-             (unsigned long)sleep_seconds);
-    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(sleep_seconds * 1000U);
-    bool button_pressed_before = false;
-    TickType_t pressed_since = 0;
-    while (button_pressed_before || (int32_t)(deadline - xTaskGetTickCount()) > 0) {
-        const bool button_pressed = gpio_get_level(BOARD_BUTTON_BOOT_GPIO) == 0;
-        if (button_pressed && !button_pressed_before) {
-            vTaskDelay(pdMS_TO_TICKS(BUTTON_DEBOUNCE_MS));
-            if (gpio_get_level(BOARD_BUTTON_BOOT_GPIO) == 0) {
-                button_pressed_before = true;
-                pressed_since = xTaskGetTickCount();
-            }
-        } else if (button_pressed && button_pressed_before &&
-                   (xTaskGetTickCount() - pressed_since) >=
-                       pdMS_TO_TICKS(PROVISION_HOLD_MS)) {
-            ESP_LOGI(TAG, "GP9 held for five seconds: starting Wi-Fi provisioning");
-            ESP_ERROR_CHECK_WITHOUT_ABORT(provisioning_run());
-            while (gpio_get_level(BOARD_BUTTON_BOOT_GPIO) == 0) {
-                vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
-            }
-            return;
-        } else if (!button_pressed && button_pressed_before) {
-            s_state.page = (s_state.page + 1U) % 5U;
-            refresh_delta_page(current_view);
-            button_pressed_before = false;
-        }
-        vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
-    }
-    s_state.page = (s_state.page + 1U) % 5U;
-#endif
 }
 
 static void enter_startup_failure_sleep(esp_err_t error)
 {
     ESP_LOGE(TAG, "board initialization failed: %s", esp_err_to_name(error));
-#if CONFIG_RHT_DEEP_SLEEP
-    ESP_LOGE(TAG, "retrying in %d seconds; POWER can wake the board sooner",
-             STARTUP_RETRY_SECONDS);
-    vTaskDelay(pdMS_TO_TICKS(250));
-    ESP_ERROR_CHECK_WITHOUT_ABORT(
-        esp_sleep_enable_timer_wakeup((uint64_t)STARTUP_RETRY_SECONDS * 1000000ULL));
-    ESP_ERROR_CHECK_WITHOUT_ABORT(
-        esp_sleep_enable_ext1_wakeup_io(DEEP_SLEEP_WAKE_MASK, ESP_EXT1_WAKEUP_ANY_LOW));
-    esp_deep_sleep_start();
-#else
-    ESP_LOGE(TAG, "deep sleep is disabled; USB remains active for diagnostics");
+    if (!usb_serial_jtag_is_connected()) {
+        ESP_LOGE(TAG, "retrying in %d seconds; POWER can wake the board sooner",
+                 STARTUP_RETRY_SECONDS);
+        vTaskDelay(pdMS_TO_TICKS(250));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(
+            esp_sleep_enable_timer_wakeup((uint64_t)STARTUP_RETRY_SECONDS * 1000000ULL));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(
+            esp_sleep_enable_ext1_wakeup_io(DEEP_SLEEP_WAKE_MASK, ESP_EXT1_WAKEUP_ANY_LOW));
+        esp_deep_sleep_start();
+    }
+    ESP_LOGE(TAG, "USB host connected; staying awake for diagnostics");
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(STARTUP_RETRY_SECONDS * 1000));
     }
-#endif
 }
 
 void app_main(void)
 {
+    ESP_LOGI(TAG, "reset reason=%d, wakeup causes=0x%08lx",
+             (int)esp_reset_reason(), (unsigned long)esp_sleep_get_wakeup_causes());
     if (s_state.magic != STATE_MAGIC) {
         memset(&s_state, 0, sizeof(s_state));
         s_state.magic = STATE_MAGIC;
         s_state.last_rssi = -127;
     }
-    rotate_page_for_wakeup();
     setenv("TZ", CONFIG_RHT_TIMEZONE, 1);
     tzset();
 
     init_nvs();
+    ESP_ERROR_CHECK_WITHOUT_ABORT(stats_migrate_temperature_offset(600));
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_ERROR_CHECK(device_console_start());
     esp_err_t board_result = board_init();
     if (board_result != ESP_OK) {
         enter_startup_failure_sleep(board_result);
@@ -237,7 +251,12 @@ void app_main(void)
     }
     if (boot_button_held_for_provisioning()) {
         ESP_LOGI(TAG, "GP9 held during startup: starting Wi-Fi provisioning");
-        ESP_ERROR_CHECK_WITHOUT_ABORT(provisioning_run());
+        const esp_err_t result = provisioning_run();
+        if (result == ESP_OK) {
+            provisioning_completed();
+        } else {
+            ESP_ERROR_CHECK_WITHOUT_ABORT(result);
+        }
         while (gpio_get_level(BOARD_BUTTON_BOOT_GPIO) == 0) {
             vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
         }
@@ -296,6 +315,9 @@ void app_main(void)
         ESP_ERROR_CHECK_WITHOUT_ABORT(stats_add_sample(&s_state.stats, now,
                                                        sample.temperature_c, sample.humidity_pct));
     }
+    if (s_state.samples_since_update < UINT32_MAX) {
+        ++s_state.samples_since_update;
+    }
     float day_min = sample.temperature_c;
     float day_max = sample.temperature_c;
     if (time_valid) {
@@ -303,20 +325,20 @@ void app_main(void)
     }
     const float dew = dew_point(sample.temperature_c, sample.humidity_pct);
 
-    const time_t current_hour = time_valid ? hour_start(now) : 0;
-    const bool hour_trigger = time_valid &&
-                              (!s_state.has_transmitted || s_state.last_tx_hour != current_hour);
-    const bool delta_trigger = s_state.has_transmitted &&
-                               fabsf(sample.temperature_c - s_state.last_tx_temperature) >
-                               (float)CONFIG_RHT_TX_DELTA_C_X100 / 100.0f;
-    const bool should_transmit = network_is_configured() && (hour_trigger || delta_trigger);
+    const uint32_t update_multiplier =
+        CONFIG_RHT_UPDATE_FREQ <= 1 ? 1U : (uint32_t)CONFIG_RHT_UPDATE_FREQ;
+    const bool should_transmit = network_is_configured() &&
+                                 s_state.samples_since_update >= update_multiplier;
 
     if (should_transmit && !wifi_connected && !wifi_attempted) {
         wifi_attempted = true;
         wifi_connected = network_connect(&s_state.last_rssi) == ESP_OK;
     }
+    if (wifi_attempted) {
+        s_state.last_wifi_connected = wifi_connected;
+    }
     if (should_transmit && wifi_connected) {
-        const network_measurement_t measurement = {
+        network_measurement_t measurement = {
             .timestamp = now,
             .temperature_c = sample.temperature_c,
             .humidity_pct = sample.humidity_pct,
@@ -327,13 +349,26 @@ void app_main(void)
             .battery_pct = battery_percent,
             .rssi = s_state.last_rssi,
         };
+        if (time_valid) {
+            for (uint8_t page = 0; page < NETWORK_HISTORY_COUNT; ++page) {
+                float history_delta = 0;
+                const char *history_label = NULL;
+                measurement.history_valid[page] =
+                    stats_delta_reference(&s_state.stats, page, now,
+                                          sample.temperature_c, &history_delta,
+                                          &history_label);
+                if (measurement.history_valid[page]) {
+                    measurement.history_delta_c[page] = history_delta;
+                    measurement.history_reference_c[page] =
+                        sample.temperature_c - history_delta;
+                }
+            }
+        }
         const bool discovery_due = !is_time_valid(s_state.last_discovery) ||
                                    now < s_state.last_discovery ||
                                    now - s_state.last_discovery >= 24 * 3600;
         if (network_publish(&measurement, discovery_due) == ESP_OK) {
-            s_state.has_transmitted = true;
-            s_state.last_tx_temperature = sample.temperature_c;
-            s_state.last_tx_hour = current_hour;
+            s_state.samples_since_update = 0;
             if (discovery_due) {
                 s_state.last_discovery = now;
             }
@@ -361,7 +396,7 @@ void app_main(void)
         .delta_label = delta_label,
         .delta_valid = delta_valid,
         .time_valid = time_valid,
-        .wifi_connected = wifi_connected,
+        .wifi_connected = s_state.last_wifi_connected,
     };
     if (time_valid) {
         view.chart_count = stats_chart_series(&s_state.stats, s_state.page, now,

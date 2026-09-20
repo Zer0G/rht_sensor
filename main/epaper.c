@@ -392,11 +392,11 @@ static void render(const epaper_view_t *view)
     const unsigned battery_pct = view->battery_pct > 100U ? 100U : view->battery_pct;
     if (view->time_valid) {
         localtime_r(&view->timestamp, &local);
-        snprintf(line, sizeof(line), "%02d:%02d - %02d/%02d/%04d",
+        snprintf(line, sizeof(line), "%02d:%02d %02d/%02d/%02d",
                  local.tm_hour, local.tm_min, local.tm_mday, local.tm_mon + 1,
-                 local.tm_year + 1900);
+                 (local.tm_year + 1900) % 100);
     } else {
-        snprintf(line, sizeof(line), "--:-- - --/--/----");
+        snprintf(line, sizeof(line), "--:-- --/--/--");
     }
     rssi_indicator(1, 1, view->rssi, view->wifi_connected);
     text_with_font(18, 1, line, &s_share_tech_mono_status);

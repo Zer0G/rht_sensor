@@ -21,6 +21,7 @@
 #define WIFI_FAILED_BIT    BIT1
 #define MQTT_CONNECTED_BIT BIT0
 #define MQTT_FAILED_BIT    BIT1
+#define MQTT_DATA_BIT      BIT2
 
 static const char *TAG = "network";
 static EventGroupHandle_t s_wifi_events;
@@ -34,6 +35,10 @@ static volatile int s_last_published_id;
 #define WIFI_NVS_NAMESPACE "rht_wifi"
 #define WIFI_NVS_SSID_KEY  "ssid"
 #define WIFI_NVS_PASS_KEY  "password"
+#define MQTT_NVS_NAMESPACE "rht_mqtt"
+#define MQTT_NVS_URI_KEY   "uri"
+#define MQTT_NVS_USER_KEY  "username"
+#define MQTT_NVS_PASS_KEY  "password"
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -102,6 +107,88 @@ esp_err_t network_save_wifi_credentials(const char *ssid, const char *password)
     return result;
 }
 
+esp_err_t network_clear_wifi_credentials(void)
+{
+    nvs_handle_t nvs;
+    ESP_RETURN_ON_ERROR(nvs_open(WIFI_NVS_NAMESPACE, NVS_READWRITE, &nvs),
+                        TAG, "open Wi-Fi NVS");
+    esp_err_t result = nvs_erase_all(nvs);
+    if (result == ESP_OK) result = nvs_commit(nvs);
+    nvs_close(nvs);
+    return result;
+}
+
+bool network_get_mqtt_config(char *uri, size_t uri_size,
+                             char *username, size_t username_size,
+                             char *password, size_t password_size)
+{
+    if (!uri || uri_size == 0 || !username || username_size == 0 ||
+        !password || password_size == 0) {
+        return false;
+    }
+    uri[0] = '\0';
+    username[0] = '\0';
+    password[0] = '\0';
+
+    nvs_handle_t nvs;
+    if (nvs_open(MQTT_NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        size_t stored_uri_size = uri_size;
+        size_t stored_username_size = username_size;
+        size_t stored_password_size = password_size;
+        const esp_err_t uri_result =
+            nvs_get_str(nvs, MQTT_NVS_URI_KEY, uri, &stored_uri_size);
+        const esp_err_t username_result =
+            nvs_get_str(nvs, MQTT_NVS_USER_KEY, username, &stored_username_size);
+        const esp_err_t password_result =
+            nvs_get_str(nvs, MQTT_NVS_PASS_KEY, password, &stored_password_size);
+        nvs_close(nvs);
+        if (uri_result == ESP_OK && username_result == ESP_OK &&
+            password_result == ESP_OK && uri[0]) {
+            return true;
+        }
+        uri[0] = '\0';
+        username[0] = '\0';
+        password[0] = '\0';
+    }
+
+    strlcpy(uri, CONFIG_RHT_MQTT_URI, uri_size);
+    strlcpy(username, CONFIG_RHT_MQTT_USERNAME, username_size);
+    strlcpy(password, CONFIG_RHT_MQTT_PASSWORD, password_size);
+    return uri[0] != '\0';
+}
+
+esp_err_t network_save_mqtt_config(const char *uri, const char *username,
+                                   const char *password)
+{
+    if (!uri || !uri[0] || strlen(uri) >= NETWORK_MQTT_URI_SIZE ||
+        !username || strlen(username) >= NETWORK_MQTT_USERNAME_SIZE ||
+        !password || strlen(password) >= NETWORK_MQTT_PASSWORD_SIZE ||
+        (strncmp(uri, "mqtt://", 7) != 0 && strncmp(uri, "mqtts://", 8) != 0)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t nvs;
+    ESP_RETURN_ON_ERROR(nvs_open(MQTT_NVS_NAMESPACE, NVS_READWRITE, &nvs),
+                        TAG, "open MQTT NVS");
+    esp_err_t result = nvs_set_str(nvs, MQTT_NVS_URI_KEY, uri);
+    if (result == ESP_OK) result = nvs_set_str(nvs, MQTT_NVS_USER_KEY, username);
+    if (result == ESP_OK) result = nvs_set_str(nvs, MQTT_NVS_PASS_KEY, password);
+    if (result == ESP_OK) result = nvs_commit(nvs);
+    nvs_close(nvs);
+    return result;
+}
+
+esp_err_t network_clear_mqtt_config(void)
+{
+    nvs_handle_t nvs;
+    ESP_RETURN_ON_ERROR(nvs_open(MQTT_NVS_NAMESPACE, NVS_READWRITE, &nvs),
+                        TAG, "open MQTT NVS");
+    esp_err_t result = nvs_erase_all(nvs);
+    if (result == ESP_OK) result = nvs_commit(nvs);
+    nvs_close(nvs);
+    return result;
+}
+
 bool network_has_wifi_credentials(void)
 {
     char ssid[33];
@@ -111,7 +198,12 @@ bool network_has_wifi_credentials(void)
 
 bool network_is_configured(void)
 {
-    return network_has_wifi_credentials() && CONFIG_RHT_MQTT_URI[0] != '\0';
+    char uri[NETWORK_MQTT_URI_SIZE];
+    char username[NETWORK_MQTT_USERNAME_SIZE];
+    char password[NETWORK_MQTT_PASSWORD_SIZE];
+    return network_has_wifi_credentials() &&
+           network_get_mqtt_config(uri, sizeof(uri), username, sizeof(username),
+                                   password, sizeof(password));
 }
 
 esp_err_t network_connect(int8_t *rssi)
@@ -209,6 +301,11 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         xEventGroupSetBits(s_mqtt_events, MQTT_FAILED_BIT);
     } else if (id == MQTT_EVENT_PUBLISHED) {
         s_last_published_id = event->msg_id;
+    } else if (id == MQTT_EVENT_DATA) {
+        ESP_LOGI(TAG, "MQTT RX topic='%.*s' payload='%.*s'",
+                 event->topic_len, event->topic,
+                 event->data_len, event->data);
+        xEventGroupSetBits(s_mqtt_events, MQTT_DATA_BIT);
     }
 }
 
@@ -236,7 +333,9 @@ static esp_err_t publish_discovery(esp_mqtt_client_handle_t client, const char *
                                    const char *device_class, const char *state_class)
 {
     char topic[192];
-    char payload[768];
+    /* Discovery runs synchronously from the main task. Keep the large JSON
+     * buffer out of its 4 KiB stack. */
+    static char payload[768];
     snprintf(topic, sizeof(topic), "%s/%s/config", CONFIG_RHT_MQTT_BASE_TOPIC, key);
     snprintf(payload, sizeof(payload),
              "{\"name\":\"%s\",\"unique_id\":\"%s_%s\","
@@ -250,9 +349,29 @@ static esp_err_t publish_discovery(esp_mqtt_client_handle_t client, const char *
     return publish_wait(client, topic, payload, 1, true);
 }
 
+static bool json_append_optional_float(char *payload, size_t payload_size,
+                                       size_t *used, const char *key,
+                                       bool valid, float value)
+{
+    const int written = valid
+        ? snprintf(payload + *used, payload_size - *used, ",\"%s\":%.2f", key, value)
+        : snprintf(payload + *used, payload_size - *used, ",\"%s\":null", key);
+    if (written < 0 || (size_t)written >= payload_size - *used) {
+        return false;
+    }
+    *used += (size_t)written;
+    return true;
+}
+
 esp_err_t network_publish(const network_measurement_t *measurement, bool send_discovery)
 {
-    if (!measurement || CONFIG_RHT_MQTT_URI[0] == '\0') {
+    char mqtt_uri[NETWORK_MQTT_URI_SIZE];
+    char mqtt_username[NETWORK_MQTT_USERNAME_SIZE];
+    char mqtt_password[NETWORK_MQTT_PASSWORD_SIZE];
+    if (!measurement ||
+        !network_get_mqtt_config(mqtt_uri, sizeof(mqtt_uri),
+                                 mqtt_username, sizeof(mqtt_username),
+                                 mqtt_password, sizeof(mqtt_password))) {
         return ESP_ERR_INVALID_ARG;
     }
     s_mqtt_events = xEventGroupCreate();
@@ -260,10 +379,10 @@ esp_err_t network_publish(const network_measurement_t *measurement, bool send_di
         return ESP_ERR_NO_MEM;
     }
     const esp_mqtt_client_config_t config = {
-        .broker.address.uri = CONFIG_RHT_MQTT_URI,
+        .broker.address.uri = mqtt_uri,
         .credentials.client_id = CONFIG_RHT_DEVICE_ID,
-        .credentials.username = CONFIG_RHT_MQTT_USERNAME[0] ? CONFIG_RHT_MQTT_USERNAME : NULL,
-        .credentials.authentication.password = CONFIG_RHT_MQTT_PASSWORD[0] ? CONFIG_RHT_MQTT_PASSWORD : NULL,
+        .credentials.username = mqtt_username[0] ? mqtt_username : NULL,
+        .credentials.authentication.password = mqtt_password[0] ? mqtt_password : NULL,
         .network.disable_auto_reconnect = true,
     };
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&config);
@@ -287,28 +406,87 @@ esp_err_t network_publish(const network_measurement_t *measurement, bool send_di
     }
 
     static const char celsius[] = "\xC2\xB0" "C";
+    if (result == ESP_OK) {
+        char command_topic[192];
+        snprintf(command_topic, sizeof(command_topic), "%s/command",
+                 CONFIG_RHT_MQTT_BASE_TOPIC);
+        if (esp_mqtt_client_subscribe(client, command_topic, 1) < 0) {
+            result = ESP_FAIL;
+        }
+    }
     if (result == ESP_OK && send_discovery) result = publish_discovery(client, "temperature", "Temperature", celsius, "temperature", "measurement");
     if (result == ESP_OK && send_discovery) result = publish_discovery(client, "humidity", "Humidity", "%", "humidity", "measurement");
     if (result == ESP_OK && send_discovery) result = publish_discovery(client, "dew_point", "Dew point", celsius, "temperature", "measurement");
     if (result == ESP_OK && send_discovery) result = publish_discovery(client, "day_min", "Daily minimum", celsius, "temperature", "measurement");
     if (result == ESP_OK && send_discovery) result = publish_discovery(client, "day_max", "Daily maximum", celsius, "temperature", "measurement");
     if (result == ESP_OK && send_discovery) result = publish_discovery(client, "battery", "Battery", "%", "battery", "measurement");
-    if (result == ESP_OK && send_discovery) result = publish_discovery(client, "battery_voltage", "Battery voltage", "V", "voltage", "measurement");
+    if (result == ESP_OK && send_discovery) result = publish_discovery(client, "battery_voltage", "Battery voltage", "mV", "voltage", "measurement");
     if (result == ESP_OK && send_discovery) result = publish_discovery(client, "rssi", "Wi-Fi RSSI", "dBm", "signal_strength", "measurement");
+    static const char *history_keys[NETWORK_HISTORY_COUNT] = {
+        "previous_hour", "same_hour_yesterday", "previous_week",
+        "previous_month", "previous_year",
+    };
+    static const char *history_names[NETWORK_HISTORY_COUNT] = {
+        "Previous hour", "Same hour yesterday", "Previous week",
+        "Previous month", "Previous year",
+    };
+    if (result == ESP_OK && send_discovery) {
+        for (size_t i = 0; i < NETWORK_HISTORY_COUNT && result == ESP_OK; ++i) {
+            char delta_key[48];
+            char delta_name[64];
+            result = publish_discovery(client, history_keys[i], history_names[i],
+                                       celsius, "temperature", "measurement");
+            snprintf(delta_key, sizeof(delta_key), "%s_delta", history_keys[i]);
+            snprintf(delta_name, sizeof(delta_name), "%s delta", history_names[i]);
+            if (result == ESP_OK) {
+                result = publish_discovery(client, delta_key, delta_name,
+                                           celsius, "temperature", "measurement");
+            }
+        }
+    }
 
     if (result == ESP_OK) {
         char topic[192];
-        char payload[512];
+        /* MQTT publication is serialized, so a static buffer is safe and
+         * avoids nesting another large allocation on the main task stack. */
+        static char payload[1280];
         snprintf(topic, sizeof(topic), "%s/state", CONFIG_RHT_MQTT_BASE_TOPIC);
-        snprintf(payload, sizeof(payload),
+        const int base_length = snprintf(payload, sizeof(payload),
                  "{\"timestamp\":%" PRIi64 ",\"temperature\":%.2f,\"humidity\":%.2f,"
                  "\"dew_point\":%.2f,\"day_min\":%.2f,\"day_max\":%.2f,"
-                 "\"battery\":%u,\"battery_voltage\":%.3f,\"rssi\":%d}",
+                 "\"battery\":%u,\"battery_voltage\":%.0f,\"rssi\":%d",
                  (int64_t)measurement->timestamp, measurement->temperature_c,
                  measurement->humidity_pct, measurement->dew_point_c,
                  measurement->day_min_c, measurement->day_max_c,
-                 measurement->battery_pct, measurement->battery_v, measurement->rssi);
-        result = publish_wait(client, topic, payload, 1, true);
+                 measurement->battery_pct, measurement->battery_v * 1000.0f,
+                 measurement->rssi);
+        size_t used = base_length > 0 ? (size_t)base_length : sizeof(payload);
+        if (used >= sizeof(payload)) {
+            result = ESP_ERR_INVALID_SIZE;
+        }
+        for (size_t i = 0; i < NETWORK_HISTORY_COUNT && result == ESP_OK; ++i) {
+            char delta_key[48];
+            snprintf(delta_key, sizeof(delta_key), "%s_delta", history_keys[i]);
+            if (!json_append_optional_float(payload, sizeof(payload), &used,
+                                            history_keys[i],
+                                            measurement->history_valid[i],
+                                            measurement->history_reference_c[i]) ||
+                !json_append_optional_float(payload, sizeof(payload), &used,
+                                            delta_key,
+                                            measurement->history_valid[i],
+                                            measurement->history_delta_c[i])) {
+                result = ESP_ERR_INVALID_SIZE;
+            }
+        }
+        if (result == ESP_OK && used + 2U <= sizeof(payload)) {
+            payload[used++] = '}';
+            payload[used] = '\0';
+            result = publish_wait(client, topic, payload, 1, true);
+        }
+    }
+    if (result == ESP_OK) {
+        (void)xEventGroupWaitBits(s_mqtt_events, MQTT_DATA_BIT, pdTRUE, pdFALSE,
+                                  pdMS_TO_TICKS(750));
     }
 
     if (started) {

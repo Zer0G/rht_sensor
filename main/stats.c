@@ -1,17 +1,24 @@
 #include "stats.h"
 
+#include <limits.h>
 #include <math.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_partition.h"
+#include "nvs.h"
 
 #define STATS_RUNTIME_MAGIC 0x52544832U
 #define STATS_RECORD_MAGIC  0x52544852U
-#define STATS_VERSION       1U
-#define STATS_PARTITION     "stats"
+#define STATS_LEGACY_VERSION 1U
+#define STATS_VERSION        2U
+#define STATS_PARTITION      "stats"
+#define STATS_NVS_NAMESPACE  "rht_stats"
+#define STATS_MIGRATION_KEY  "temp_mig"
+#define STATS_MIGRATION_VERSION 1U
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -48,7 +55,8 @@ static uint32_t crc32_bytes(const void *data, size_t length)
 
 static bool record_valid(const stats_record_t *record)
 {
-    if (record->magic != STATS_RECORD_MAGIC || record->version != STATS_VERSION ||
+    if (record->magic != STATS_RECORD_MAGIC ||
+        (record->version != STATS_LEGACY_VERSION && record->version != STATS_VERSION) ||
         record->kind < STATS_HOUR || record->kind > STATS_YEAR || record->sample_count == 0) {
         return false;
     }
@@ -121,6 +129,100 @@ static stats_record_t record_from_bucket(const stats_bucket_t *bucket, stats_kin
 static float record_temperature(const stats_record_t *record)
 {
     return (float)record->temp_avg_centi / 100.0f;
+}
+
+static int16_t add_centi_clamped(int16_t value, int16_t delta)
+{
+    const int32_t adjusted = (int32_t)value + delta;
+    if (adjusted > INT16_MAX) return INT16_MAX;
+    if (adjusted < INT16_MIN) return INT16_MIN;
+    return (int16_t)adjusted;
+}
+
+esp_err_t stats_migrate_temperature_offset(int16_t delta_centi)
+{
+    nvs_handle_t nvs;
+    ESP_RETURN_ON_ERROR(nvs_open(STATS_NVS_NAMESPACE, NVS_READWRITE, &nvs),
+                        TAG, "open stats migration NVS");
+    uint8_t migration_version = 0;
+    if (nvs_get_u8(nvs, STATS_MIGRATION_KEY, &migration_version) == ESP_OK &&
+        migration_version >= STATS_MIGRATION_VERSION) {
+        nvs_close(nvs);
+        return ESP_OK;
+    }
+
+    if (!s_partition) {
+        s_partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, 0x40,
+                                               STATS_PARTITION);
+    }
+    if (!s_partition) {
+        nvs_close(nvs);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    uint8_t *sector = malloc(s_partition->erase_size);
+    if (!sector) {
+        nvs_close(nvs);
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t result = ESP_OK;
+    uint32_t migrated = 0;
+    for (size_t sector_offset = 0; sector_offset < s_partition->size;
+         sector_offset += s_partition->erase_size) {
+        result = esp_partition_read(s_partition, sector_offset, sector,
+                                    s_partition->erase_size);
+        if (result != ESP_OK) break;
+
+        bool changed = false;
+        for (size_t record_offset = 0;
+             record_offset + sizeof(stats_record_t) <= s_partition->erase_size;
+             record_offset += sizeof(stats_record_t)) {
+            stats_record_t record;
+            memcpy(&record, sector + record_offset, sizeof(record));
+            if (record.version != STATS_LEGACY_VERSION || !record_valid(&record)) {
+                continue;
+            }
+            record.temp_avg_centi = add_centi_clamped(record.temp_avg_centi, delta_centi);
+            record.temp_min_centi = add_centi_clamped(record.temp_min_centi, delta_centi);
+            record.temp_max_centi = add_centi_clamped(record.temp_max_centi, delta_centi);
+            record.version = STATS_VERSION;
+            record.crc32 = 0;
+            record.crc32 = crc32_bytes(&record, sizeof(record));
+            memcpy(sector + record_offset, &record, sizeof(record));
+            changed = true;
+            ++migrated;
+        }
+        if (!changed) continue;
+
+        result = esp_partition_erase_range(s_partition, sector_offset,
+                                           s_partition->erase_size);
+        if (result != ESP_OK) break;
+        result = esp_partition_write(s_partition, sector_offset, sector,
+                                     s_partition->erase_size);
+        if (result != ESP_OK) break;
+    }
+    free(sector);
+
+    if (result == ESP_OK) {
+        result = nvs_set_u8(nvs, STATS_MIGRATION_KEY, STATS_MIGRATION_VERSION);
+        if (result == ESP_OK) result = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    if (result == ESP_OK) {
+        ESP_LOGI(TAG, "temperature history migration: +%.2f C applied to %lu records",
+                 (double)delta_centi / 100.0, (unsigned long)migrated);
+    }
+    return result;
+}
+
+static uint32_t stored_record_count(const stats_runtime_t *runtime, uint32_t capacity)
+{
+    if (!runtime || runtime->next_sequence <= 1U) {
+        return 0;
+    }
+    const uint32_t written = runtime->next_sequence - 1U;
+    return written < capacity ? written : capacity;
 }
 
 static esp_err_t storage_append(stats_runtime_t *runtime, const stats_bucket_t *bucket,
@@ -313,7 +415,8 @@ static bool storage_find(stats_kind_t kind, time_t exact_start, bool exact,
         return false;
     }
     const uint32_t capacity = s_partition->size / sizeof(stats_record_t);
-    for (uint32_t age = 0; age < capacity; ++age) {
+    const uint32_t record_count = stored_record_count(runtime, capacity);
+    for (uint32_t age = 0; age < record_count; ++age) {
         const uint32_t slot = (runtime->flash_head + capacity - 1U - age) % capacity;
         stats_record_t record;
         if (esp_partition_read(s_partition, (size_t)slot * sizeof(record), &record, sizeof(record)) != ESP_OK) {
@@ -457,8 +560,9 @@ uint8_t stats_chart_series(const stats_runtime_t *runtime, uint8_t page,
         limit = capacity;
     }
     const uint32_t flash_capacity = s_partition->size / sizeof(stats_record_t);
+    const uint32_t record_count = stored_record_count(runtime, flash_capacity);
     uint8_t count = 0;
-    for (uint32_t age = 0; age < flash_capacity && count < limit; ++age) {
+    for (uint32_t age = 0; age < record_count && count < limit; ++age) {
         const uint32_t slot = (runtime->flash_head + flash_capacity - 1U - age) % flash_capacity;
         stats_record_t record;
         if (esp_partition_read(s_partition, (size_t)slot * sizeof(record),

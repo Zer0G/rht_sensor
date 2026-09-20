@@ -12,7 +12,7 @@ OUTPUT = ROOT / "main" / "font_share_tech_mono.h"
 FIRST_CHAR = 32
 LAST_CHAR = 90
 EXTRA_CHARACTERS = "°"
-STATUS_FONT_SIZE = 15
+STATUS_FONT_SIZE = 18
 FONT_SIZES = (17, 22, 30, 46)
 
 

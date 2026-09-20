@@ -36,6 +36,7 @@ typedef struct {
 } stats_runtime_t;
 
 esp_err_t stats_init(stats_runtime_t *runtime, time_t now);
+esp_err_t stats_migrate_temperature_offset(int16_t delta_centi);
 esp_err_t stats_add_sample(stats_runtime_t *runtime, time_t timestamp,
                            float temperature_c, float humidity_pct);
 void stats_today_extremes(const stats_runtime_t *runtime, float current,

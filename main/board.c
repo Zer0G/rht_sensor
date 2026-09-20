@@ -28,6 +28,7 @@
 #define TCA_OUTPUT_REG     0x01
 #define TCA_CONFIG_REG     0x03
 #define TCA_EPD_POWER_BIT  (1U << 0)
+#define TCA_GREEN_LED_BIT  (1U << 4)
 #define TCA_BAT_ENABLE_BIT (1U << 5)
 #define BATTERY_ADC_CHAN   ADC_CHANNEL_0
 #define BATTERY_ADC_SAMPLES 32
@@ -146,7 +147,7 @@ static const battery_ocv_point_t s_battery_ocv_curve[] = {
     {3730,  25}, {3750,  30}, {3770,  35}, {3790,  40}, {3800,  45},
     {3820,  50}, {3850,  55}, {3870,  60}, {3910,  65}, {3950,  70},
     {3980,  75}, {4020,  80}, {4050,  85}, {4080,  90}, {4100,  95},
-    {4120, 100},
+    {4180, 100},
 };
 
 static uint8_t battery_percent_from_ocv(uint32_t millivolts)
@@ -210,9 +211,10 @@ esp_err_t board_init(void)
     ESP_RETURN_ON_ERROR(add_i2c_device(PCF85063_ADDRESS, &s_rtc), TAG, "RTC");
     ESP_RETURN_ON_ERROR(add_i2c_device(TCA9554_ADDRESS, &s_expander), TAG, "TCA9554");
 
-    /* P2 (RTC interrupt) and P6 (touch interrupt) are inputs; all other pins outputs. */
-    /* EXIO5 keeps the battery power path enabled after the PWR key is released. */
-    s_expander_output = TCA_BAT_ENABLE_BIT;
+    /* P2 (RTC interrupt) and P6 (touch interrupt) are inputs; all other pins outputs.
+     * EXIO5 keeps the battery power path enabled after the PWR key is released.
+     * The green LED is active-low on EXIO4 (the schematic's GP4 path is not fitted). */
+    s_expander_output = TCA_BAT_ENABLE_BIT | TCA_GREEN_LED_BIT;
     ESP_RETURN_ON_ERROR(expander_commit(), TAG, "TCA output");
     ESP_RETURN_ON_ERROR(write_register(s_expander, TCA_CONFIG_REG, 0x44), TAG, "TCA direction");
 
@@ -380,4 +382,6 @@ esp_err_t board_rtc_set(time_t utc)
 void board_prepare_for_sleep(void)
 {
     (void)board_epaper_power(false);
+    s_expander_output |= TCA_GREEN_LED_BIT;
+    (void)expander_commit();
 }
