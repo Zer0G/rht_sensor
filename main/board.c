@@ -213,8 +213,9 @@ esp_err_t board_init(void)
 
     /* P2 (RTC interrupt) and P6 (touch interrupt) are inputs; all other pins outputs.
      * EXIO5 keeps the battery power path enabled after the PWR key is released.
-     * The green LED is active-low on EXIO4 (the schematic's GP4 path is not fitted). */
-    s_expander_output = TCA_BAT_ENABLE_BIT | TCA_GREEN_LED_BIT;
+     * The green LED is active-low on EXIO4 (the schematic's GP4 path is not fitted),
+     * so leave its bit cleared while the device is awake. */
+    s_expander_output = TCA_BAT_ENABLE_BIT;
     ESP_RETURN_ON_ERROR(expander_commit(), TAG, "TCA output");
     ESP_RETURN_ON_ERROR(write_register(s_expander, TCA_CONFIG_REG, 0x44), TAG, "TCA direction");
 
@@ -382,6 +383,7 @@ esp_err_t board_rtc_set(time_t utc)
 void board_prepare_for_sleep(void)
 {
     (void)board_epaper_power(false);
+    /* Active-low: turn the activity LED off before deep sleep. */
     s_expander_output |= TCA_GREEN_LED_BIT;
     (void)expander_commit();
 }

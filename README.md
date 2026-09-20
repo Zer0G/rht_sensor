@@ -18,7 +18,7 @@ Firmware ESP-IDF per la board Waveshare **ESP32-C6-ePaper-1.54**. Il dispositivo
 - auto-discovery Home Assistant per temperatura, umidità, punto di rugiada, minimo/massimo giornalieri, batteria, tensione e RSSI;
 - finestra console di 30 secondi con un host USB collegato, poi deep sleep;
 - console comandi persistente tramite USB Serial/JTAG;
-- LED verde pilotato spento tramite EXIO4 anche durante il deep sleep.
+- LED verde acceso durante il ciclo attivo e spento tramite EXIO4 prima del deep sleep.
 
 La misura SHTC3 viene eseguita prima di accendere la radio, così il calore prodotto dal Wi-Fi non altera il campione. L'offset predefinito è `0,00 °C` ed è configurabile da menu. Al primo avvio di questa versione, i record storici della versione precedente vengono migrati una sola volta aggiungendo `6,00 °C` a media, minimo e massimo.
 
@@ -120,7 +120,7 @@ La mappatura deriva dallo schema della board e dagli esempi ufficiali:
 | tasto Power / BOOT | GPIO2 / GPIO9 |
 | LED verde | TCA9554 EXIO4, attivo basso (`GP4` non montato) |
 
-Il caricabatterie ETA6098 presente sulla scheda gestisce autonomamente la carica Li-ion. Il firmware calcola una percentuale indicativa dalla tensione a vuoto, con il 100% impostato a 4180 mV. Il pin `STAT` pilota soltanto la sezione rossa del LED bicolore e non è collegato al microcontrollore; per questo il firmware non può distinguere in modo affidabile `charging` e `discharging`. La sezione verde è invece pilotata da EXIO4 e viene mantenuta spenta.
+Il caricabatterie ETA6098 presente sulla scheda gestisce autonomamente la carica Li-ion. Il firmware calcola una percentuale indicativa dalla tensione a vuoto, con il 100% impostato a 4180 mV. Il pin `STAT` pilota soltanto la sezione rossa del LED bicolore e non è collegato al microcontrollore; per questo il firmware non può distinguere in modo affidabile `charging` e `discharging`. La sezione verde è invece pilotata da EXIO4: segnala il ciclo attivo e viene spenta prima del deep sleep.
 
 Lo schema non porta VBUS a un ingresso del microcontrollore. I pacchetti SOF USB Serial/JTAG permettono di rilevare un host e offrire una finestra console di 30 secondi; scaduta la finestra il dispositivo entra comunque in deep sleep. Un caricatore o power bank privo di dati USB non viene considerato connesso.
 
