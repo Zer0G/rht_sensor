@@ -78,6 +78,8 @@ static esp_err_t fetch_manifest(char *manifest, size_t manifest_size)
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = 15000,
         .keep_alive_enable = false,
+        .disable_auto_redirect = false,
+        .max_redirection_counts = 5,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) return ESP_ERR_NO_MEM;
@@ -154,6 +156,8 @@ esp_err_t ota_install_from_github(void)
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = 30000,
         .keep_alive_enable = false,
+        .disable_auto_redirect = false,
+        .max_redirection_counts = 5,
     };
     const esp_https_ota_config_t ota_config = {
         .http_config = &http_config,
