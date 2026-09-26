@@ -25,7 +25,8 @@ automatic Home Assistant integration.
 - Home Assistant MQTT auto-discovery;
 - deep sleep with timer and Power-button wake-up;
 - temporary active window when connected to a USB host;
-- battery percentage estimated from an OCV curve, with 100% at 4180 mV;
+- battery percentage calculated from the measured constant-load discharge table,
+  interpolated between 2810 mV (0%) and 4160 mV (100%);
 - green LED on EXIO4 turned off before deep sleep.
 
 ## Supported hardware
@@ -158,23 +159,44 @@ idf.py -p COMx erase-flash
 
 This also erases NVS credentials and the stored history.
 
-## FOTA status
+## FOTA through GitHub Releases
 
-FOTA distribution through GitHub Releases is planned as a future enhancement.
-The current configuration uses a 'factory' application partition; robust FOTA
-will require two application slots, 'ota_0'/'ota_1', and an 'otadata' partition.
+The firmware supports HTTPS FOTA from public GitHub Releases using two OTA
+application slots and rollback protection. The default manifest URL is
+`https://github.com/zer0g/climacarta/releases/latest/download/manifest.json`.
 
-The planned architecture is:
+Each release must contain `rht_sensor.bin` and a `manifest.json` asset (see
+`ota/manifest.json.example`):
+
+~~~json
+{
+  "version": "1.0.0",
+  "url": "https://github.com/zer0g/climacarta/releases/download/v1.0.0/rht_sensor.bin",
+  "sha256": "64_lowercase_or_uppercase_hex_characters"
+}
+~~~
+
+Build the firmware and calculate its digest with
+`Get-FileHash build/rht_sensor.bin -Algorithm SHA256`. Upload the binary to the
+release, fill in the digest, then upload the manifest as `manifest.json`. The
+device verifies the manifest and image over HTTPS, checks SHA-256, switches
+slots, and confirms the new image after reboot.
+
+Publish `ota_install` (or `{"command":"ota_install"}`) to the configured MQTT
+command topic to request an update. `ota_check` is accepted for forward
+compatibility and does not install an image.
+
+The first firmware using the dual-slot layout requires a full erase before
+flashing because the partition table changes. This erases measurements and
+provisioning data; configure Wi-Fi and MQTT again afterwards.
 
 ~~~text
 Home Assistant --MQTT--> ESP32-C6 --HTTPS--> GitHub Release
 ~~~
 
-The firmware will be able to download a public manifest, verify SHA-256, install
-the new slot, and confirm the image after self-tests, with automatic rollback
-if the new image fails.
-
 ## License
 
-The project is currently under development. Define the license before the first
-public GitHub release.
+Copyright (C) 2026 Zer0G
+
+This project is licensed under the GNU General Public License, version 3 or
+later (GPL-3.0-or-later). See [LICENSE](LICENSE) for the full text.

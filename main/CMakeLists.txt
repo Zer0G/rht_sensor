@@ -7,6 +7,7 @@ idf_component_register(
         "network.c"
         "provisioning.c"
         "device_console.c"
+        "ota.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_adc
@@ -15,6 +16,9 @@ idf_component_register(
         esp_driver_spi
         esp_driver_usb_serial_jtag
         esp_event
+        esp_https_ota
+        esp_http_client
+        app_update
         esp_hw_support
         esp_netif
         esp_http_server

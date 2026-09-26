@@ -31,6 +31,7 @@ static esp_event_handler_instance_t s_wifi_handler;
 static esp_event_handler_instance_t s_ip_handler;
 static int s_wifi_retries;
 static volatile int s_last_published_id;
+static volatile bool s_ota_requested;
 
 #define WIFI_NVS_NAMESPACE "rht_wifi"
 #define WIFI_NVS_SSID_KEY  "ssid"
@@ -306,7 +307,26 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
                  event->topic_len, event->topic,
                  event->data_len, event->data);
         xEventGroupSetBits(s_mqtt_events, MQTT_DATA_BIT);
+        char command[128] = {0};
+        if (event->data && event->data_len > 0) {
+            size_t command_length = (size_t)event->data_len;
+            if (command_length >= sizeof(command)) command_length = sizeof(command) - 1U;
+            memcpy(command, event->data, command_length);
+            command[command_length] = '\0';
+        }
+        if (strstr(command, "ota_install") || strstr(command, "ota_check")) {
+            s_ota_requested = strstr(command, "ota_install") != NULL;
+            ESP_LOGI(TAG, "OTA command received: %s",
+                     s_ota_requested ? "install" : "check");
+        }
     }
+}
+
+bool network_take_ota_request(void)
+{
+    const bool requested = s_ota_requested;
+    s_ota_requested = false;
+    return requested;
 }
 
 static esp_err_t publish_wait(esp_mqtt_client_handle_t client, const char *topic,

@@ -137,28 +137,28 @@ static int64_t days_from_civil(int year, unsigned month, unsigned day)
 typedef struct {
     uint16_t millivolts;
     uint8_t percent;
-} battery_ocv_point_t;
+} battery_soc_point_t;
 
-/* Generic 1S Li-ion/LiPo open-circuit curve at room temperature. The board
- * reads VBAT before Wi-Fi starts, so the load-induced voltage drop is small.
- * Tune these points if the fitted cell has a manufacturer OCV curve. */
-static const battery_ocv_point_t s_battery_ocv_curve[] = {
-    {3270,   0}, {3500,   5}, {3610,  10}, {3690,  15}, {3710,  20},
-    {3730,  25}, {3750,  30}, {3770,  35}, {3790,  40}, {3800,  45},
-    {3820,  50}, {3850,  55}, {3870,  60}, {3910,  65}, {3950,  70},
-    {3980,  75}, {4020,  80}, {4050,  85}, {4080,  90}, {4100,  95},
-    {4180, 100},
+/* Cell discharge characterization from the supplied constant-load trace.
+ * Each point represents an equal 5% slice of the elapsed discharge time,
+ * from the absolute voltage maximum (100%) to the final minimum (0%). */
+static const battery_soc_point_t s_battery_soc_table[] = {
+    {2810,   0}, {3400,   5}, {3500,  10}, {3545,  15}, {3600,  20},
+    {3670,  25}, {3740,  30}, {3790,  35}, {3815,  40}, {3840,  45},
+    {3855,  50}, {3870,  55}, {3895,  60}, {3950,  65}, {3995,  70},
+    {4010,  75}, {4025,  80}, {4030,  85}, {4045,  90}, {4075,  95},
+    {4160, 100},
 };
 
-static uint8_t battery_percent_from_ocv(uint32_t millivolts)
+static uint8_t battery_percent_from_voltage(uint32_t millivolts)
 {
-    if (millivolts <= s_battery_ocv_curve[0].millivolts) {
+    if (millivolts <= s_battery_soc_table[0].millivolts) {
         return 0;
     }
-    for (size_t i = 1; i < sizeof(s_battery_ocv_curve) / sizeof(s_battery_ocv_curve[0]); ++i) {
-        if (millivolts <= s_battery_ocv_curve[i].millivolts) {
-            const battery_ocv_point_t *low = &s_battery_ocv_curve[i - 1];
-            const battery_ocv_point_t *high = &s_battery_ocv_curve[i];
+    for (size_t i = 1; i < sizeof(s_battery_soc_table) / sizeof(s_battery_soc_table[0]); ++i) {
+        if (millivolts <= s_battery_soc_table[i].millivolts) {
+            const battery_soc_point_t *low = &s_battery_soc_table[i - 1];
+            const battery_soc_point_t *high = &s_battery_soc_table[i];
             const uint32_t voltage_span = high->millivolts - low->millivolts;
             const uint32_t percent_span = high->percent - low->percent;
             const uint32_t interpolated =
@@ -325,8 +325,8 @@ esp_err_t board_read_battery(float *voltage, uint8_t *percent)
         (uint32_t)((millivolts_sum + sample_count / 2U) / sample_count);
     const uint32_t battery_millivolts = adc_millivolts * BATTERY_DIVIDER_RATIO;
     *voltage = (float)battery_millivolts / 1000.0f;
-    *percent = battery_percent_from_ocv(battery_millivolts);
-    ESP_LOGI(TAG, "battery OCV: %lu mV, SOC: %u%%",
+    *percent = battery_percent_from_voltage(battery_millivolts);
+    ESP_LOGI(TAG, "battery voltage: %lu mV, SOC: %u%%",
              (unsigned long)battery_millivolts, (unsigned)*percent);
     return ESP_OK;
 }

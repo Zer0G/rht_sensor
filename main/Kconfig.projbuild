@@ -24,6 +24,13 @@ config RHT_MQTT_BASE_TOPIC
     string "MQTT base topic"
     default "homeassistant/sensor/rht_epaper"
 
+config RHT_OTA_MANIFEST_URL
+    string "GitHub OTA manifest URL"
+        default "https://github.com/zer0g/climacarta/releases/latest/download/manifest.json"
+    help
+        Public HTTPS URL of the GitHub Releases manifest. The manifest must
+        contain version, url, and sha256 string fields.
+
 config RHT_DEVICE_ID
     string "Home Assistant device id"
     default "rht_epaper"

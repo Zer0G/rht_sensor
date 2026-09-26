@@ -35,16 +35,16 @@ static void console_write(const char *format, ...)
 static void print_help(void)
 {
     console_write(
-        "\r\nComandi disponibili:\r\n"
+        "\r\nAvailable commands:\r\n"
         "  help\r\n"
         "  show\r\n"
         "  wifi set <ssid> [password]\r\n"
         "  wifi clear\r\n"
-        "  mqtt set <mqtt://host:porta> [utente] [password]\r\n"
+        "  mqtt set <mqtt://host:port> [username] [password]\r\n"
         "  mqtt clear\r\n"
         "  reboot\r\n"
-        "Usa le virgolette per valori con spazi e \\ per l'escape.\r\n"
-        "L'input non viene ripetuto, cosi' le password restano nascoste.\r\n");
+        "Use quotes for values containing spaces and \\ for escaping.\r\n"
+        "Input is not echoed, so passwords remain hidden.\r\n");
 }
 
 static int split_arguments(char *line, char **arguments, int capacity)
@@ -92,19 +92,19 @@ static void print_configuration(void)
                                               mqtt_password, sizeof(mqtt_password));
     console_write("\r\nWi-Fi: %s\r\n  SSID: %s\r\n  password: %s\r\n"
                   "MQTT: %s\r\n  URI: %s\r\n  username: %s\r\n  password: %s\r\n",
-                  wifi ? "configurato" : "non configurato", wifi ? ssid : "-",
-                  wifi && wifi_password[0] ? "********" : "(vuota)",
-                  mqtt ? "configurato" : "non configurato", mqtt ? uri : "-",
-                  mqtt && username[0] ? username : "(vuoto)",
-                  mqtt && mqtt_password[0] ? "********" : "(vuota)");
+                  wifi ? "configured" : "not configured", wifi ? ssid : "-",
+                  wifi && wifi_password[0] ? "********" : "(empty)",
+                  mqtt ? "configured" : "not configured", mqtt ? uri : "-",
+                  mqtt && username[0] ? username : "(empty)",
+                  mqtt && mqtt_password[0] ? "********" : "(empty)");
 }
 
 static void report_result(esp_err_t result)
 {
     if (result == ESP_OK) {
-        console_write("OK - configurazione salvata; sara' usata dal prossimo ciclo.\r\n");
+        console_write("OK - configuration saved; it will be used on the next cycle.\r\n");
     } else {
-        console_write("ERRORE: %s\r\n", esp_err_to_name(result));
+        console_write("ERROR: %s\r\n", esp_err_to_name(result));
     }
 }
 
@@ -113,7 +113,7 @@ static void execute_line(char *line)
     char *arguments[CONSOLE_MAX_ARGS];
     const int count = split_arguments(line, arguments, CONSOLE_MAX_ARGS);
     if (count < 0) {
-        console_write("ERRORE: sintassi o virgolette non valide.\r\n");
+        console_write("ERROR: invalid syntax or quotes.\r\n");
     } else if (count == 0) {
         return;
     } else if ((!strcmp(arguments[0], "help") || !strcmp(arguments[0], "?")) &&
@@ -137,11 +137,11 @@ static void execute_line(char *line)
                                                 count >= 4 ? arguments[3] : "",
                                                 count == 5 ? arguments[4] : ""));
     } else if (!strcmp(arguments[0], "reboot") && count == 1) {
-        console_write("Riavvio...\r\n");
+        console_write("Restarting...\r\n");
         vTaskDelay(pdMS_TO_TICKS(100));
         esp_restart();
     } else {
-        console_write("ERRORE: comando non riconosciuto. Digita 'help'.\r\n");
+        console_write("ERROR: unknown command. Type 'help'.\r\n");
     }
 }
 
@@ -155,7 +155,7 @@ static void console_task(void *argument)
     while (true) {
         const bool connected = usb_serial_jtag_is_connected();
         if (connected && !was_connected) {
-            console_write("\r\nRHT console pronta. Digita 'help'.\r\nrht> ");
+            console_write("\r\nRHT console ready. Type 'help'.\r\nrht> ");
         }
         was_connected = connected;
 
@@ -183,7 +183,7 @@ static void console_task(void *argument)
                 line[used++] = value;
             } else if ((unsigned char)value >= 0x20) {
                 used = 0;
-                console_write("\r\nERRORE: riga troppo lunga.\r\nrht> ");
+                console_write("\r\nERROR: line too long.\r\nrht> ");
             }
         }
     }

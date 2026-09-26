@@ -49,18 +49,18 @@ static const char s_portal_html[] =
     "box-shadow:0 2px 14px #0002}h1{margin-top:0}label{display:block;margin-top:18px}"
     "input{box-sizing:border-box;width:100%;padding:12px;margin-top:6px;font-size:16px}"
     "button{width:100%;padding:13px;margin-top:24px;font-size:16px;background:#111;color:white;"
-    "border:0;border-radius:8px}</style></head><body><main><h1>Configura dispositivo</h1>"
-    "<p>Inserisci la rete Wi-Fi e il broker MQTT di Home Assistant.</p>"
-    "<form method=post action=/save><label>Nome rete (SSID)"
+    "border:0;border-radius:8px}</style></head><body><main><h1>Configure device</h1>"
+    "<p>Enter the Wi-Fi network and Home Assistant MQTT broker.</p>"
+    "<form method=post action=/save><label>Network name (SSID)"
     "<input name=ssid maxlength=32 required autocomplete='off'></label>"
     "<label>Password<input name=password type=password maxlength=64 autocomplete='off'></label>"
     "<label>Broker MQTT<input name=mqtt_uri maxlength=127 required "
     "value='mqtt://192.168.2.99:1883' autocapitalize=off autocomplete='off'></label>"
-    "<label>Utente MQTT<input name=mqtt_username maxlength=64 "
+    "<label>MQTT username<input name=mqtt_username maxlength=64 "
     "autocapitalize=off autocomplete='off'></label>"
     "<label>Password MQTT<input name=mqtt_password type=password maxlength=64 "
     "autocomplete='off'></label>"
-    "<button type=submit>Salva e verifica</button></form></main></body></html>";
+    "<button type=submit>Save and verify</button></form></main></body></html>";
 
 static void provisioning_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -135,7 +135,7 @@ static esp_err_t root_get(httpd_req_t *request)
 static esp_err_t save_post(httpd_req_t *request)
 {
     if (request->content_len <= 0 || request->content_len >= 1024) {
-        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "Dati non validi");
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "Invalid data");
     }
     char body[1024];
     size_t received = 0;
@@ -144,7 +144,7 @@ static esp_err_t save_post(httpd_req_t *request)
                                          request->content_len - received);
         if (count <= 0) {
             return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                       "Ricezione non riuscita");
+                                       "Failed to receive data");
         }
         received += (size_t)count;
     }
@@ -163,7 +163,7 @@ static esp_err_t save_post(httpd_req_t *request)
         (strncmp(mqtt_uri, "mqtt://", 7) != 0 &&
          strncmp(mqtt_uri, "mqtts://", 8) != 0)) {
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
-                                   "Parametri Wi-Fi o MQTT non validi");
+                                   "Invalid Wi-Fi or MQTT settings");
     }
 
     wifi_config_t station = {0};
@@ -191,8 +191,8 @@ static esp_err_t save_post(httpd_req_t *request)
         httpd_resp_set_status(request, "503 Service Unavailable");
         httpd_resp_set_type(request, "text/html; charset=utf-8");
         return httpd_resp_send(request,
-            "<html><body><h2>Connessione non riuscita</h2>"
-            "<p>Controlla SSID e password, poi torna indietro e riprova.</p></body></html>",
+            "<html><body><h2>Connection failed</h2>"
+            "<p>Check the SSID and password, then go back and try again.</p></body></html>",
             HTTPD_RESP_USE_STRLEN);
     }
 
@@ -202,13 +202,13 @@ static esp_err_t save_post(httpd_req_t *request)
     }
     if (result != ESP_OK) {
         return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                   "Salvataggio non riuscito");
+                                   "Failed to save settings");
     }
     ESP_LOGI(TAG, "Wi-Fi and MQTT configuration saved for SSID '%s'", ssid);
     httpd_resp_set_type(request, "text/html; charset=utf-8");
     result = httpd_resp_send(request,
-        "<html><body><h2>Configurazione completata</h2>"
-        "<p>Wi-Fi e MQTT sono stati salvati. Puoi chiudere questa pagina.</p></body></html>",
+        "<html><body><h2>Configuration complete</h2>"
+        "<p>Wi-Fi and MQTT settings have been saved. You can close this page.</p></body></html>",
         HTTPD_RESP_USE_STRLEN);
     xEventGroupSetBits(s_events, PROVISION_DONE_BIT);
     return result;

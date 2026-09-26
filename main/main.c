@@ -21,6 +21,7 @@
 #include "freertos/task.h"
 #include "network.h"
 #include "nvs_flash.h"
+#include "ota.h"
 #include "provisioning.h"
 #include "sdkconfig.h"
 #include "stats.h"
@@ -249,6 +250,7 @@ void app_main(void)
         enter_startup_failure_sleep(board_result);
         return;
     }
+    ESP_ERROR_CHECK_WITHOUT_ABORT(ota_confirm_running_image());
     if (boot_button_held_for_provisioning()) {
         ESP_LOGI(TAG, "GP9 held during startup: starting Wi-Fi provisioning");
         const esp_err_t result = provisioning_run();
@@ -374,6 +376,11 @@ void app_main(void)
             }
         } else {
             ESP_LOGW(TAG, "MQTT publish failed; it will be retried on the next wake");
+        }
+        if (network_take_ota_request()) {
+            ESP_LOGI(TAG, "starting GitHub OTA update");
+            const esp_err_t ota_result = ota_install_from_github();
+            ESP_LOGE(TAG, "GitHub OTA failed: %s", esp_err_to_name(ota_result));
         }
     }
 

@@ -43,3 +43,4 @@ bool network_get_mqtt_config(char *uri, size_t uri_size,
 void network_disconnect(void);
 bool network_has_wifi_credentials(void);
 bool network_is_configured(void);
+bool network_take_ota_request(void);
