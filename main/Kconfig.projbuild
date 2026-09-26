@@ -26,7 +26,7 @@ config RHT_MQTT_BASE_TOPIC
 
 config RHT_OTA_MANIFEST_URL
     string "GitHub OTA manifest URL"
-        default "https://github.com/zer0g/climacarta/releases/latest/download/manifest.json"
+        default "https://github.com/zer0g/climacarta/releases/download/v0.1.5/manifest.json"
     help
         Public HTTPS URL of the GitHub Releases manifest. The manifest must
         contain version, url, and sha256 string fields.
