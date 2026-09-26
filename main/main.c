@@ -50,6 +50,15 @@ typedef struct {
 RTC_DATA_ATTR static persistent_state_t s_state;
 static const char *TAG = "rht_sensor";
 
+static void ota_task(void *arg)
+{
+    (void)arg;
+    ESP_LOGI(TAG, "starting GitHub OTA update");
+    const esp_err_t ota_result = ota_install_from_github();
+    ESP_LOGE(TAG, "GitHub OTA failed: %s", esp_err_to_name(ota_result));
+    vTaskDelete(NULL);
+}
+
 static void provisioning_completed(void)
 {
     s_state.last_discovery = 0;
@@ -378,9 +387,9 @@ void app_main(void)
             ESP_LOGW(TAG, "MQTT publish failed; it will be retried on the next wake");
         }
         if (network_take_ota_request()) {
-            ESP_LOGI(TAG, "starting GitHub OTA update");
-            const esp_err_t ota_result = ota_install_from_github();
-            ESP_LOGE(TAG, "GitHub OTA failed: %s", esp_err_to_name(ota_result));
+            if (xTaskCreate(ota_task, "ota_task", 12288, NULL, 5, NULL) != pdPASS) {
+                ESP_LOGE(TAG, "cannot start OTA task");
+            }
         }
     }
 
