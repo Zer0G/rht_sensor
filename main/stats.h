@@ -18,6 +18,7 @@ typedef struct {
     time_t period_start;
     double temp_sum;
     double humidity_sum;
+    double battery_mv_sum;
     uint32_t sample_count;
     float temp_min;
     float temp_max;
@@ -39,6 +40,9 @@ esp_err_t stats_init(stats_runtime_t *runtime, time_t now);
 esp_err_t stats_migrate_temperature_offset(int16_t delta_centi);
 esp_err_t stats_add_sample(stats_runtime_t *runtime, time_t timestamp,
                            float temperature_c, float humidity_pct);
+esp_err_t stats_add_sample_with_battery(stats_runtime_t *runtime, time_t timestamp,
+                                        float temperature_c, float humidity_pct,
+                                        float battery_mv);
 void stats_today_extremes(const stats_runtime_t *runtime, float current,
                           float *minimum, float *maximum);
 bool stats_delta_reference(const stats_runtime_t *runtime, uint8_t page,
@@ -46,3 +50,5 @@ bool stats_delta_reference(const stats_runtime_t *runtime, uint8_t page,
                            float *delta, const char **label);
 uint8_t stats_chart_series(const stats_runtime_t *runtime, uint8_t page,
                            time_t now, float *values, uint8_t capacity);
+uint8_t stats_battery_chart(const stats_runtime_t *runtime, time_t now,
+                            float *values, uint8_t capacity);

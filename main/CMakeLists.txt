@@ -7,6 +7,7 @@ idf_component_register(
         "network.c"
         "provisioning.c"
         "device_console.c"
+        "settings.c"
         "ota.c"
     INCLUDE_DIRS "."
     REQUIRES

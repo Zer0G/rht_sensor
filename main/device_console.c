@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "network.h"
+#include "settings.h"
 
 #define CONSOLE_LINE_SIZE 384
 #define CONSOLE_MAX_ARGS  8
@@ -42,6 +43,9 @@ static void print_help(void)
         "  wifi clear\r\n"
         "  mqtt set <mqtt://host:port> [username] [password]\r\n"
         "  mqtt clear\r\n"
+        "  settings\r\n"
+        "  settings t_sample <seconds>\r\n"
+        "  settings update_freq <samples>\r\n"
         "  reboot\r\n"
         "Use quotes for values containing spaces and \\ for escaping.\r\n"
         "Input is not echoed, so passwords remain hidden.\r\n");
@@ -97,6 +101,9 @@ static void print_configuration(void)
                   mqtt ? "configured" : "not configured", mqtt ? uri : "-",
                   mqtt && username[0] ? username : "(empty)",
                   mqtt && mqtt_password[0] ? "********" : "(empty)");
+    console_write("Settings: t_sample=%lu s, update_freq=%lu samples\r\n",
+                  (unsigned long)settings_get_t_sample(),
+                  (unsigned long)settings_get_update_freq());
 }
 
 static void report_result(esp_err_t result)
@@ -136,6 +143,15 @@ static void execute_line(char *line)
         report_result(network_save_mqtt_config(arguments[2],
                                                 count >= 4 ? arguments[3] : "",
                                                 count == 5 ? arguments[4] : ""));
+    } else if (!strcmp(arguments[0], "settings") && count == 1) {
+        console_write("t_sample=%lu s, update_freq=%lu samples\r\n",
+                      (unsigned long)settings_get_t_sample(),
+                      (unsigned long)settings_get_update_freq());
+    } else if (!strcmp(arguments[0], "settings") && count == 3 &&
+               (!strcmp(arguments[1], "t_sample") || !strcmp(arguments[1], "update_freq"))) {
+        char command[64];
+        snprintf(command, sizeof(command), "%s=%s", arguments[1], arguments[2]);
+        report_result(settings_apply_command(command) ? ESP_OK : ESP_ERR_INVALID_ARG);
     } else if (!strcmp(arguments[0], "reboot") && count == 1) {
         console_write("Restarting...\r\n");
         vTaskDelay(pdMS_TO_TICKS(100));

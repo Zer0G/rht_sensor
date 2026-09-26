@@ -21,6 +21,9 @@ typedef struct {
     int8_t rssi;
     const char *delta_label;
     float chart_values[EPAPER_CHART_MAX_POINTS];
+    float history_delta_c[4];
+    bool history_valid[4];
+    uint8_t page;
     uint8_t chart_count;
     bool delta_valid;
     bool time_valid;

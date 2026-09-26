@@ -27,7 +27,7 @@ typedef struct __attribute__((packed)) {
     uint32_t sample_count;
     uint8_t kind;
     uint8_t version;
-    uint16_t reserved;
+    uint16_t battery_avg_mv;
     int16_t temp_avg_centi;
     int16_t humidity_avg_centi;
     int16_t temp_min_centi;
@@ -97,11 +97,12 @@ static void bucket_reset(stats_bucket_t *bucket, time_t start)
     bucket->temp_max = -INFINITY;
 }
 
-static void bucket_add(stats_bucket_t *bucket, float temperature, float humidity, uint32_t count,
-                       float minimum, float maximum)
+static void bucket_add(stats_bucket_t *bucket, float temperature, float humidity,
+                       float battery_mv, uint32_t count, float minimum, float maximum)
 {
     bucket->temp_sum += (double)temperature * count;
     bucket->humidity_sum += (double)humidity * count;
+    if (battery_mv > 0) bucket->battery_mv_sum += (double)battery_mv * count;
     bucket->sample_count += count;
     bucket->temp_min = fminf(bucket->temp_min, minimum);
     bucket->temp_max = fmaxf(bucket->temp_max, maximum);
@@ -119,6 +120,8 @@ static stats_record_t record_from_bucket(const stats_bucket_t *bucket, stats_kin
         .version = STATS_VERSION,
         .temp_avg_centi = (int16_t)lround(bucket->temp_sum * 100.0 / bucket->sample_count),
         .humidity_avg_centi = (int16_t)lround(bucket->humidity_sum * 100.0 / bucket->sample_count),
+        .battery_avg_mv = bucket->battery_mv_sum > 0 ?
+            (uint16_t)lround(bucket->battery_mv_sum / bucket->sample_count) : 0,
         .temp_min_centi = (int16_t)lroundf(bucket->temp_min * 100.0f),
         .temp_max_centi = (int16_t)lroundf(bucket->temp_max * 100.0f),
     };
@@ -256,7 +259,8 @@ static esp_err_t storage_append(stats_runtime_t *runtime, const stats_bucket_t *
 static void reconstruct_add(stats_bucket_t *bucket, const stats_record_t *record)
 {
     bucket_add(bucket, record_temperature(record), (float)record->humidity_avg_centi / 100.0f,
-               record->sample_count, (float)record->temp_min_centi / 100.0f,
+               (float)record->battery_avg_mv, record->sample_count,
+               (float)record->temp_min_centi / 100.0f,
                (float)record->temp_max_centi / 100.0f);
 }
 
@@ -364,8 +368,9 @@ esp_err_t stats_init(stats_runtime_t *runtime, time_t now)
     return storage_scan(runtime, now, true);
 }
 
-esp_err_t stats_add_sample(stats_runtime_t *runtime, time_t timestamp,
-                           float temperature_c, float humidity_pct)
+esp_err_t stats_add_sample_with_battery(stats_runtime_t *runtime, time_t timestamp,
+                                        float temperature_c, float humidity_pct,
+                                        float battery_mv)
 {
     if (!runtime || !isfinite(temperature_c) || !isfinite(humidity_pct)) {
         return ESP_ERR_INVALID_ARG;
@@ -381,8 +386,16 @@ esp_err_t stats_add_sample(stats_runtime_t *runtime, time_t timestamp,
         ESP_RETURN_ON_ERROR(advance_rollups(runtime, timestamp), TAG, "advance periods");
         bucket_reset(&runtime->hour, sample_hour);
     }
-    bucket_add(&runtime->hour, temperature_c, humidity_pct, 1, temperature_c, temperature_c);
+    bucket_add(&runtime->hour, temperature_c, humidity_pct, battery_mv, 1,
+               temperature_c, temperature_c);
     return ESP_OK;
+}
+
+esp_err_t stats_add_sample(stats_runtime_t *runtime, time_t timestamp,
+                           float temperature_c, float humidity_pct)
+{
+    return stats_add_sample_with_battery(runtime, timestamp, temperature_c,
+                                         humidity_pct, 0);
 }
 
 void stats_today_extremes(const stats_runtime_t *runtime, float current,
@@ -484,19 +497,23 @@ bool stats_delta_reference(const stats_runtime_t *runtime, uint8_t page,
         record_found = storage_find(STATS_HOUR, mktime(&previous), true, &record, runtime);
         found = record_found;
     } else {
-        stats_kind_t kind = STATS_WEEK;
+        struct tm previous;
+        localtime_r(&now, &previous);
+        previous.tm_min = 0;
+        previous.tm_sec = 0;
+        previous.tm_isdst = -1;
         if (page == 2) {
             *label = "PREV WEEK";
-            kind = STATS_WEEK;
+            previous.tm_mday -= 7;
         } else if (page == 3) {
             *label = "PREV MONTH";
-            kind = STATS_MONTH;
+            previous.tm_mon -= 1;
         } else {
             *label = "PREV YEAR";
-            kind = STATS_YEAR;
+            previous.tm_year -= 1;
         }
-        const time_t target = previous_period_start(now, kind);
-        record_found = storage_find(kind, target, true, &record, runtime);
+        const time_t target = mktime(&previous);
+        record_found = storage_find(STATS_HOUR, target, true, &record, runtime);
         found = record_found;
     }
     if (record_found) {
@@ -584,5 +601,41 @@ uint8_t stats_chart_series(const stats_runtime_t *runtime, uint8_t page,
         values[right] = temporary;
     }
     ESP_LOGI(TAG, "chart page=%u points=%u", (unsigned)page, (unsigned)count);
+    return count;
+}
+
+uint8_t stats_battery_chart(const stats_runtime_t *runtime, time_t now,
+                            float *values, uint8_t capacity)
+{
+    if (!runtime || !values || !capacity || !s_partition) return 0;
+    const uint32_t flash_capacity = s_partition->size / sizeof(stats_record_t);
+    const uint32_t record_count = stored_record_count(runtime, flash_capacity);
+    struct tm start_tm;
+    localtime_r(&now, &start_tm);
+    start_tm.tm_hour = 0;
+    start_tm.tm_min = 0;
+    start_tm.tm_sec = 0;
+    start_tm.tm_mday -= 30;
+    start_tm.tm_isdst = -1;
+    const time_t range_start = mktime(&start_tm);
+    const time_t range_end = period_start(now, STATS_DAY);
+    uint8_t count = 0;
+    for (uint32_t age = 0; age < record_count && count < capacity; ++age) {
+        const uint32_t slot = (runtime->flash_head + flash_capacity - 1U - age) % flash_capacity;
+        stats_record_t record;
+        if (esp_partition_read(s_partition, (size_t)slot * sizeof(record),
+                               &record, sizeof(record)) != ESP_OK) break;
+        if (!record_valid(&record) || record.kind != STATS_DAY ||
+            record.battery_avg_mv == 0) continue;
+        const time_t record_start = (time_t)record.period_start;
+        if (record_start >= range_start && record_start < range_end) {
+            values[count++] = (float)record.battery_avg_mv;
+        }
+    }
+    for (uint8_t left = 0, right = count ? count - 1U : 0; left < right; ++left, --right) {
+        const float temporary = values[left];
+        values[left] = values[right];
+        values[right] = temporary;
+    }
     return count;
 }

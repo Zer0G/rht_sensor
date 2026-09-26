@@ -26,7 +26,7 @@ config RHT_MQTT_BASE_TOPIC
 
 config RHT_OTA_MANIFEST_URL
     string "GitHub OTA manifest URL"
-        default "https://github.com/zer0g/climacarta/releases/download/v0.1.5/manifest.json"
+        default "https://github.com/zer0g/climacarta/releases/latest/download/manifest.json"
     help
         Public HTTPS URL of the GitHub Releases manifest. The manifest must
         contain version, url, and sha256 string fields.
@@ -48,9 +48,9 @@ config RHT_T_SAMPLE
     range 10 86400
     default 900
     help
-        Interval between sensor readings and statistics updates. The device
-        offers a short command-console window when connected to an active USB
-        host, then uses this value for the deep-sleep timer.
+        Interval between sensor readings and statistics updates. While an
+        active USB host is connected, the device stays awake and keeps the
+        command console available.
 
 config RHT_UPDATE_FREQ
     int "update_freq: MQTT update multiplier"

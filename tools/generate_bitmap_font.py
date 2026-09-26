@@ -1,4 +1,4 @@
-"""Generate the embedded 1-bpp Share Tech Mono font used by the e-paper UI."""
+"""Generate the embedded 1-bpp Meedori Sans font used by the e-paper UI."""
 
 from pathlib import Path
 from math import ceil
@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "font" / "Share-TechMono.ttf"
+SOURCE = ROOT / "font" / "Meedori Sans Typeface" / "Meedori Sans Regular.ttf"
 OUTPUT = ROOT / "main" / "font_share_tech_mono.h"
 FIRST_CHAR = 32
 LAST_CHAR = 90
@@ -56,7 +56,7 @@ def main() -> None:
         "",
         "#include <stdint.h>",
         "",
-        "/* Generated from font/Share-TechMono.ttf by tools/generate_bitmap_font.py. */",
+        "/* Generated from Meedori Sans Regular by tools/generate_bitmap_font.py. */",
         f"#define SHARE_TECH_MONO_FIRST_CHAR {FIRST_CHAR}",
         f"#define SHARE_TECH_MONO_LAST_CHAR  {LAST_CHAR}",
         f"#define SHARE_TECH_MONO_DEGREE_INDEX {LAST_CHAR - FIRST_CHAR + 1}",

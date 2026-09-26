@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_app_desc.h"
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -16,6 +17,7 @@
 #include "mqtt_client.h"
 #include "nvs.h"
 #include "sdkconfig.h"
+#include "settings.h"
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAILED_BIT    BIT1
@@ -318,6 +320,8 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             s_ota_requested = strstr(command, "ota_install") != NULL;
             ESP_LOGI(TAG, "OTA command received: %s",
                      s_ota_requested ? "install" : "check");
+        } else if (settings_apply_command(command)) {
+            ESP_LOGI(TAG, "runtime setting updated: %s", command);
         }
     }
 }
@@ -366,6 +370,71 @@ static esp_err_t publish_discovery(esp_mqtt_client_handle_t client, const char *
              "\"model\":\"ESP32-C6-ePaper-1.54\"}}",
              name, CONFIG_RHT_DEVICE_ID, key, CONFIG_RHT_MQTT_BASE_TOPIC, key,
              unit, device_class, state_class, CONFIG_RHT_DEVICE_ID);
+    return publish_wait(client, topic, payload, 1, true);
+}
+
+static esp_err_t publish_firmware_discovery(esp_mqtt_client_handle_t client)
+{
+    char topic[192];
+    static char payload[768];
+    snprintf(topic, sizeof(topic), "%s/firmware_version/config",
+             CONFIG_RHT_MQTT_BASE_TOPIC);
+    snprintf(payload, sizeof(payload),
+             "{\"name\":\"Firmware version\",\"unique_id\":\"%s_firmware_version\"," 
+             "\"state_topic\":\"%s/firmware_version/state\","
+             "\"icon\":\"mdi:chip\",\"device\":{\"identifiers\":[\"%s\"],"
+             "\"name\":\"RHT ePaper\",\"manufacturer\":\"Waveshare\","
+             "\"model\":\"ESP32-C6-ePaper-1.54\"}}",
+             CONFIG_RHT_DEVICE_ID, CONFIG_RHT_MQTT_BASE_TOPIC,
+             CONFIG_RHT_DEVICE_ID);
+    return publish_wait(client, topic, payload, 1, true);
+}
+
+static esp_err_t publish_update_discovery(esp_mqtt_client_handle_t client)
+{
+    char topic[192];
+    static char payload[768];
+    snprintf(topic, sizeof(topic), "%s/firmware_update/config",
+             CONFIG_RHT_MQTT_BASE_TOPIC);
+    snprintf(payload, sizeof(payload),
+             "{\"name\":\"Firmware update\",\"unique_id\":\"%s_firmware_update\","
+             "\"state_topic\":\"%s/firmware_update/state\","
+             "\"value_template\":\"{{ value_json.installed_version }}\","
+             "\"latest_version_topic\":\"%s/firmware_update/state\","
+             "\"latest_version_template\":\"{{ value_json.latest_version }}\","
+             "\"command_topic\":\"%s/command\",\"payload_install\":\"ota_install\","
+             "\"device_class\":\"firmware\",\"release_url\":\"https://github.com/zer0g/climacarta/releases\","
+             "\"device\":{\"identifiers\":[\"%s\"],\"name\":\"RHT ePaper\","
+             "\"manufacturer\":\"Waveshare\",\"model\":\"ESP32-C6-ePaper-1.54\"}}",
+             CONFIG_RHT_DEVICE_ID, CONFIG_RHT_MQTT_BASE_TOPIC,
+             CONFIG_RHT_MQTT_BASE_TOPIC, CONFIG_RHT_MQTT_BASE_TOPIC,
+             CONFIG_RHT_DEVICE_ID);
+    return publish_wait(client, topic, payload, 1, true);
+}
+
+static esp_err_t publish_runtime_settings_discovery(esp_mqtt_client_handle_t client)
+{
+    char topic[192];
+    static char payload[768];
+    snprintf(topic, sizeof(topic), "%s/t_sample/config", CONFIG_RHT_MQTT_BASE_TOPIC);
+    snprintf(payload, sizeof(payload),
+             "{\"name\":\"Sample interval\",\"unique_id\":\"%s_t_sample\","
+             "\"state_topic\":\"%s/settings/state\",\"value_template\":\"{{ value_json.t_sample }}\","
+             "\"command_topic\":\"%s/command\",\"command_template\":\"t_sample={{ value }}\","
+             "\"unit_of_measurement\":\"s\",\"min\":10,\"max\":86400,\"step\":1,\"mode\":\"box\","
+             "\"device\":{\"identifiers\":[\"%s\"],\"name\":\"RHT ePaper\"}}",
+             CONFIG_RHT_DEVICE_ID, CONFIG_RHT_MQTT_BASE_TOPIC,
+             CONFIG_RHT_MQTT_BASE_TOPIC, CONFIG_RHT_DEVICE_ID);
+    if (publish_wait(client, topic, payload, 1, true) != ESP_OK) return ESP_FAIL;
+    snprintf(topic, sizeof(topic), "%s/update_freq/config", CONFIG_RHT_MQTT_BASE_TOPIC);
+    snprintf(payload, sizeof(payload),
+             "{\"name\":\"MQTT update frequency\",\"unique_id\":\"%s_update_freq\","
+             "\"state_topic\":\"%s/settings/state\",\"value_template\":\"{{ value_json.update_freq }}\","
+             "\"command_topic\":\"%s/command\",\"command_template\":\"update_freq={{ value }}\","
+             "\"unit_of_measurement\":\"samples\",\"min\":0,\"max\":255,\"step\":1,\"mode\":\"box\","
+             "\"device\":{\"identifiers\":[\"%s\"],\"name\":\"RHT ePaper\"}}",
+             CONFIG_RHT_DEVICE_ID, CONFIG_RHT_MQTT_BASE_TOPIC,
+             CONFIG_RHT_MQTT_BASE_TOPIC, CONFIG_RHT_DEVICE_ID);
     return publish_wait(client, topic, payload, 1, true);
 }
 
@@ -442,6 +511,15 @@ esp_err_t network_publish(const network_measurement_t *measurement, bool send_di
     if (result == ESP_OK && send_discovery) result = publish_discovery(client, "battery", "Battery", "%", "battery", "measurement");
     if (result == ESP_OK && send_discovery) result = publish_discovery(client, "battery_voltage", "Battery voltage", "mV", "voltage", "measurement");
     if (result == ESP_OK && send_discovery) result = publish_discovery(client, "rssi", "Wi-Fi RSSI", "dBm", "signal_strength", "measurement");
+    if (result == ESP_OK && send_discovery) {
+        result = publish_firmware_discovery(client);
+    }
+    if (result == ESP_OK && send_discovery) {
+        result = publish_update_discovery(client);
+    }
+    if (result == ESP_OK && send_discovery) {
+        result = publish_runtime_settings_discovery(client);
+    }
     static const char *history_keys[NETWORK_HISTORY_COUNT] = {
         "previous_hour", "same_hour_yesterday", "previous_week",
         "previous_month", "previous_year",
@@ -466,16 +544,45 @@ esp_err_t network_publish(const network_measurement_t *measurement, bool send_di
     }
 
     if (result == ESP_OK) {
+        const esp_app_desc_t *app = esp_app_get_description();
+        char firmware_topic[192];
+        snprintf(firmware_topic, sizeof(firmware_topic),
+                 "%s/firmware_version/state", CONFIG_RHT_MQTT_BASE_TOPIC);
+        result = publish_wait(client, firmware_topic, app->version, 1, true);
+    }
+    if (result == ESP_OK) {
+        char update_topic[192];
+        static char update_payload[192];
+        snprintf(update_topic, sizeof(update_topic),
+                 "%s/firmware_update/state", CONFIG_RHT_MQTT_BASE_TOPIC);
+        snprintf(update_payload, sizeof(update_payload),
+                 "{\"installed_version\":\"%s\",\"latest_version\":\"%s\"}",
+                 measurement->installed_version, measurement->latest_version);
+        result = publish_wait(client, update_topic, update_payload, 1, true);
+    }
+    if (result == ESP_OK) {
+        char settings_topic[192];
+        static char settings_payload[96];
+        snprintf(settings_topic, sizeof(settings_topic), "%s/settings/state",
+                 CONFIG_RHT_MQTT_BASE_TOPIC);
+        snprintf(settings_payload, sizeof(settings_payload),
+                 "{\"t_sample\":%lu,\"update_freq\":%lu}",
+                 (unsigned long)settings_get_t_sample(),
+                 (unsigned long)settings_get_update_freq());
+        result = publish_wait(client, settings_topic, settings_payload, 1, true);
+    }
+    if (result == ESP_OK) {
         char topic[192];
         /* MQTT publication is serialized, so a static buffer is safe and
          * avoids nesting another large allocation on the main task stack. */
         static char payload[1280];
         snprintf(topic, sizeof(topic), "%s/state", CONFIG_RHT_MQTT_BASE_TOPIC);
         const int base_length = snprintf(payload, sizeof(payload),
-                 "{\"timestamp\":%" PRIi64 ",\"temperature\":%.2f,\"humidity\":%.2f,"
+                 "{\"timestamp\":%" PRIi64 ",\"firmware_version\":\"%s\",\"temperature\":%.2f,\"humidity\":%.2f,"
                  "\"dew_point\":%.2f,\"day_min\":%.2f,\"day_max\":%.2f,"
                  "\"battery\":%u,\"battery_voltage\":%.0f,\"rssi\":%d",
-                 (int64_t)measurement->timestamp, measurement->temperature_c,
+                 (int64_t)measurement->timestamp, esp_app_get_description()->version,
+                 measurement->temperature_c,
                  measurement->humidity_pct, measurement->dew_point_c,
                  measurement->day_min_c, measurement->day_max_c,
                  measurement->battery_pct, measurement->battery_v * 1000.0f,

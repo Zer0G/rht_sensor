@@ -228,16 +228,6 @@ static size_t text_cell_count(const char *value)
     return count;
 }
 
-static void text(int x, int y, const char *value, int scale)
-{
-    if (scale < 1) {
-        scale = 1;
-    } else if (scale > 4) {
-        scale = 4;
-    }
-    text_with_font(x, y, value, s_share_tech_mono_fonts[scale - 1]);
-}
-
 static void text_bold(int x, int y, const char *value, int scale)
 {
     if (scale < 1) {
@@ -268,6 +258,17 @@ static void text_centered(int y, const char *value, int scale)
     const bitmap_font_t *font = s_share_tech_mono_fonts[scale - 1];
     const int width = (int)text_cell_count(value) * font->width;
     text_with_font((EPD_WIDTH - width) / 2, y, value, font);
+}
+
+static void text_bold_centered(int y, const char *value, int scale)
+{
+    if (scale < 1) scale = 1;
+    if (scale > 4) scale = 4;
+    const bitmap_font_t *font = s_share_tech_mono_fonts[scale - 1];
+    const int width = (int)text_cell_count(value) * font->width;
+    const int x = (EPD_WIDTH - width) / 2;
+    text_with_font(x, y, value, font);
+    text_with_font(x + 1, y, value, font);
 }
 
 static void rssi_indicator(int x, int y, int8_t rssi, bool connected)
@@ -405,25 +406,40 @@ static void render(const epaper_view_t *view)
     text_bold_right(200, 1, line, &s_share_tech_mono_status);
     horizontal_line(20);
 
-    snprintf(line, sizeof(line), "%.1f" "\xc2\xb0" "C", view->temperature_c);
-    text_centered(24, line, 4);
-    snprintf(line, sizeof(line), "MIN %.1f MAX %.1f", view->day_min_c, view->day_max_c);
-    if (text_cell_count(line) * s_share_tech_mono_fonts[1]->width > EPD_WIDTH - 4) {
-        snprintf(line, sizeof(line), "MIN %.0f MAX %.0f", view->day_min_c, view->day_max_c);
-    }
-    text_centered(70, line, 2);
-    snprintf(line, sizeof(line), "RH %.0f%% DEW %.1fC", view->humidity_pct, view->dew_point_c);
-    text_centered(96, line, 2);
-
-    horizontal_line(137);
-    text_bold(4, 142, view->delta_label ? view->delta_label : "DELTA", 1);
-    if (view->delta_valid) {
-        snprintf(line, sizeof(line), "%+.1fC", view->delta_c);
+    if (view->page == 0) {
+        snprintf(line, sizeof(line), "%.1f" "\xc2\xb0" "C", view->temperature_c);
+        text_bold_centered(24, line, 3);
+        snprintf(line, sizeof(line), "MIN %.1f MAX %.1f", view->day_min_c, view->day_max_c);
+        text_centered(60, line, 2);
+        snprintf(line, sizeof(line), "RH %.0f%%", view->humidity_pct);
+        text_bold_centered(86, line, 3);
+        snprintf(line, sizeof(line), "DEW %.1fC", view->dew_point_c);
+        text_centered(116, line, 1);
+        horizontal_line(137);
+        text_bold(4, 142, "DELTA HOUR", 1);
+        if (view->delta_valid) {
+            snprintf(line, sizeof(line), "%+.1fC", view->delta_c);
+        } else {
+            snprintf(line, sizeof(line), "NO DATA");
+        }
+        text_centered(view->delta_valid ? 166 : 170, line, view->delta_valid ? 3 : 2);
     } else {
-        snprintf(line, sizeof(line), "NO DATA");
+        text_bold(4, 25, "HISTORY DELTAS", 1);
+        static const char *labels[] = {"DAY", "WEEK", "MONTH", "YEAR"};
+        for (size_t i = 0; i < 4; ++i) {
+            snprintf(line, sizeof(line), "%s", labels[i]);
+            text_bold(8, 45 + (int)i * 20, line, 1);
+            if (view->history_valid[i]) {
+                snprintf(line, sizeof(line), "%+.1fC", view->history_delta_c[i]);
+            } else {
+                snprintf(line, sizeof(line), "NO DATA");
+            }
+            text_bold_right(96, 45 + (int)i * 20, line, s_share_tech_mono_fonts[1]);
+        }
+        horizontal_line(128);
+        text_bold(4, 132, "BATTERY 30 DAYS", 1);
+        history_chart(view->chart_values, view->chart_count);
     }
-    text(5, view->delta_valid ? 166 : 170, line, view->delta_valid ? 3 : 2);
-    history_chart(view->chart_values, view->chart_count);
 }
 
 static esp_err_t prepare_display(void)

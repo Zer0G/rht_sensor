@@ -11,6 +11,7 @@
 #define NETWORK_MQTT_URI_SIZE      128
 #define NETWORK_MQTT_USERNAME_SIZE 65
 #define NETWORK_MQTT_PASSWORD_SIZE 65
+#define NETWORK_VERSION_SIZE       64
 
 typedef struct {
     time_t timestamp;
@@ -22,6 +23,8 @@ typedef struct {
     float battery_v;
     uint8_t battery_pct;
     int8_t rssi;
+    char installed_version[NETWORK_VERSION_SIZE];
+    char latest_version[NETWORK_VERSION_SIZE];
     float history_reference_c[NETWORK_HISTORY_COUNT];
     float history_delta_c[NETWORK_HISTORY_COUNT];
     bool history_valid[NETWORK_HISTORY_COUNT];

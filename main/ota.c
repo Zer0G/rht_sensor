@@ -17,8 +17,8 @@
 
 #define OTA_MANIFEST_MAX_SIZE 2048
 #define OTA_URL_MAX_SIZE      512
-#define OTA_VERSION_MAX_SIZE 64
 #define OTA_SHA256_HEX_SIZE   65
+#define OTA_HTTP_BUFFER_SIZE  4096
 
 static const char *TAG = "ota";
 
@@ -78,8 +78,12 @@ static esp_err_t fetch_manifest(char *manifest, size_t manifest_size)
         .url = CONFIG_RHT_OTA_MANIFEST_URL,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = 15000,
+        .buffer_size = OTA_HTTP_BUFFER_SIZE,
+        .buffer_size_tx = OTA_HTTP_BUFFER_SIZE,
         .keep_alive_enable = false,
-        .disable_auto_redirect = false,
+        /* GitHub may emit multiple redirects. Handle each one explicitly so
+         * the connection is reopened after the URL changes. */
+        .disable_auto_redirect = true,
         .max_redirection_count = 5,
     };
     ESP_LOGI(TAG, "manifest URL: %s", CONFIG_RHT_OTA_MANIFEST_URL);
@@ -92,7 +96,10 @@ static esp_err_t fetch_manifest(char *manifest, size_t manifest_size)
     ESP_LOGI(TAG, "manifest open: %s errno=%d", esp_err_to_name(result),
              esp_http_client_get_errno(client));
     for (int redirect = 0; result == ESP_OK && redirect <= 5; ++redirect) {
-        result = esp_http_client_fetch_headers(client);
+        /* fetch_headers() returns the content length (int64_t), not an
+         * esp_err_t. Only negative values represent an error. */
+        const int64_t header_result = esp_http_client_fetch_headers(client);
+        result = header_result < 0 ? (esp_err_t)header_result : ESP_OK;
         const int status = esp_http_client_get_status_code(client);
         ESP_LOGI(TAG, "manifest headers: %s status=%d errno=%d length=%" PRId64,
                  esp_err_to_name(result), status, esp_http_client_get_errno(client),
@@ -105,6 +112,16 @@ static esp_err_t fetch_manifest(char *manifest, size_t manifest_size)
         result = esp_http_client_set_redirection(client);
         ESP_LOGI(TAG, "manifest redirect %d: %s", redirect + 1,
                  esp_err_to_name(result));
+        if (result == ESP_OK) {
+            /* set_redirection() closes automatically only when the host
+             * changes. Close also for same-host redirects before issuing the
+             * request for the new path. */
+            (void)esp_http_client_close(client);
+            result = esp_http_client_open(client, 0);
+            ESP_LOGI(TAG, "manifest redirect open %d: %s errno=%d",
+                     redirect + 1, esp_err_to_name(result),
+                     esp_http_client_get_errno(client));
+        }
     }
     char final_url[OTA_URL_MAX_SIZE];
     if (esp_http_client_get_url(client, final_url, sizeof(final_url)) == ESP_OK) {
@@ -134,6 +151,22 @@ static esp_err_t fetch_manifest(char *manifest, size_t manifest_size)
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
     return result;
+}
+
+esp_err_t ota_get_latest_version(char *version, size_t version_size)
+{
+    if (!version || version_size == 0) return ESP_ERR_INVALID_ARG;
+    char manifest[OTA_MANIFEST_MAX_SIZE];
+    char url[OTA_URL_MAX_SIZE];
+    char sha256[OTA_SHA256_HEX_SIZE];
+    if (fetch_manifest(manifest, sizeof(manifest)) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    if (!parse_manifest(manifest, version, url, sha256) ||
+        strlen(version) >= version_size) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    return ESP_OK;
 }
 
 static bool digest_matches(const uint8_t *digest, const char *expected)
@@ -186,6 +219,8 @@ esp_err_t ota_install_from_github(void)
         .url = url,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = 30000,
+        .buffer_size = OTA_HTTP_BUFFER_SIZE,
+        .buffer_size_tx = OTA_HTTP_BUFFER_SIZE,
         .keep_alive_enable = false,
         .disable_auto_redirect = false,
         .max_redirection_count = 5,

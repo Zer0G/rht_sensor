@@ -11,6 +11,7 @@
 #include "driver/usb_serial_jtag.h"
 #include "epaper.h"
 #include "esp_attr.h"
+#include "esp_app_desc.h"
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -25,8 +26,9 @@
 #include "provisioning.h"
 #include "sdkconfig.h"
 #include "stats.h"
+#include "settings.h"
 
-#define STATE_MAGIC 0x52485438U
+#define STATE_MAGIC 0x52485439U
 #define NTP_RETRY_SECONDS (15 * 60)
 #define STARTUP_RETRY_SECONDS 60
 #define DEEP_SLEEP_WAKE_MASK (1ULL << BOARD_BUTTON_POWER_GPIO)
@@ -45,6 +47,7 @@ typedef struct {
     int8_t last_rssi;
     uint8_t page;
     bool last_wifi_connected;
+    char discovery_version[OTA_VERSION_MAX_SIZE];
 } persistent_state_t;
 
 RTC_DATA_ATTR static persistent_state_t s_state;
@@ -52,10 +55,17 @@ static const char *TAG = "rht_sensor";
 
 static void ota_task(void *arg)
 {
-    (void)arg;
+    TaskHandle_t waiter = (TaskHandle_t)arg;
     ESP_LOGI(TAG, "starting GitHub OTA update");
     const esp_err_t ota_result = ota_install_from_github();
-    ESP_LOGE(TAG, "GitHub OTA failed: %s", esp_err_to_name(ota_result));
+    if (ota_result == ESP_ERR_NOT_FOUND) {
+        ESP_LOGI(TAG, "GitHub OTA: no newer firmware available");
+    } else if (ota_result != ESP_OK) {
+        ESP_LOGE(TAG, "GitHub OTA failed: %s", esp_err_to_name(ota_result));
+    }
+    if (waiter) {
+        xTaskNotifyGive(waiter);
+    }
     vTaskDelete(NULL);
 }
 
@@ -101,13 +111,24 @@ static void refresh_delta_page(const epaper_view_t *base_view)
     epaper_view_t view = *base_view;
     float delta = 0;
     const char *delta_label = "DELTA";
+    view.page = s_state.page;
     view.delta_valid = view.time_valid &&
-        stats_delta_reference(&s_state.stats, s_state.page, view.timestamp,
+        stats_delta_reference(&s_state.stats, 0, view.timestamp,
                               view.temperature_c, &delta, &delta_label);
     view.delta_c = delta;
     view.delta_label = delta_label;
-    view.chart_count = stats_chart_series(&s_state.stats, s_state.page, view.timestamp,
-                                          view.chart_values, EPAPER_CHART_MAX_POINTS);
+    if (s_state.page == 1 && view.time_valid) {
+        for (uint8_t i = 0; i < 4; ++i) {
+            const char *ignored_label = NULL;
+            view.history_valid[i] = stats_delta_reference(&s_state.stats, i + 1U,
+                view.timestamp, view.temperature_c, &view.history_delta_c[i],
+                &ignored_label);
+        }
+        view.chart_count = stats_battery_chart(&s_state.stats, view.timestamp,
+                                               view.chart_values, EPAPER_CHART_MAX_POINTS);
+    } else {
+        view.chart_count = 0;
+    }
     view.wifi_connected = s_state.last_wifi_connected;
 
     ESP_LOGI(TAG, "GP9: delta page %u/5 (%s)",
@@ -140,7 +161,7 @@ static void wait_for_next_cycle(time_t now, const epaper_view_t *current_view)
     epaper_shutdown();
     network_disconnect();
 
-    const uint32_t interval = CONFIG_RHT_T_SAMPLE;
+    const uint32_t interval = settings_get_t_sample();
     uint32_t sleep_seconds = interval;
     if (is_time_valid(now)) {
         const uint32_t remainder = (uint32_t)(now % interval);
@@ -148,23 +169,15 @@ static void wait_for_next_cycle(time_t now, const epaper_view_t *current_view)
     }
 
     if (usb_serial_jtag_is_connected()) {
-        ESP_LOGI(TAG, "USB host connected: console available for %u seconds",
-                 USB_CONSOLE_WINDOW_SECONDS);
-        const TickType_t deadline =
-            xTaskGetTickCount() + pdMS_TO_TICKS(USB_CONSOLE_WINDOW_SECONDS * 1000U);
+        ESP_LOGI(TAG, "USB host connected: staying awake; console remains available");
         bool button_pressed_before = false;
         TickType_t pressed_since = 0;
-        while (button_pressed_before || (int32_t)(deadline - xTaskGetTickCount()) > 0) {
+        while (usb_serial_jtag_is_connected()) {
             if (gpio_get_level(BOARD_BUTTON_POWER_GPIO) == 0) {
-                ESP_LOGI(TAG, "POWER pressed: entering deep sleep");
+                ESP_LOGI(TAG, "POWER pressed while USB is connected: staying awake");
                 while (gpio_get_level(BOARD_BUTTON_POWER_GPIO) == 0) {
                     vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
                 }
-                break;
-            }
-            if (!usb_serial_jtag_is_connected() && !button_pressed_before) {
-                ESP_LOGI(TAG, "USB host disconnected: entering deep sleep");
-                break;
             }
             const bool button_pressed = gpio_get_level(BOARD_BUTTON_BOOT_GPIO) == 0;
             if (button_pressed && !button_pressed_before) {
@@ -188,12 +201,13 @@ static void wait_for_next_cycle(time_t now, const epaper_view_t *current_view)
                 }
                 return;
             } else if (!button_pressed && button_pressed_before) {
-                s_state.page = (s_state.page + 1U) % 5U;
+                s_state.page = (s_state.page + 1U) % 2U;
                 refresh_delta_page(current_view);
                 button_pressed_before = false;
             }
             vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
         }
+        ESP_LOGI(TAG, "USB host disconnected: entering deep sleep");
         time(&now);
         if (is_time_valid(now)) {
             const uint32_t remainder = (uint32_t)(now % interval);
@@ -250,6 +264,7 @@ void app_main(void)
     tzset();
 
     init_nvs();
+    ESP_ERROR_CHECK(settings_init());
     ESP_ERROR_CHECK_WITHOUT_ABORT(stats_migrate_temperature_offset(600));
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -323,8 +338,9 @@ void app_main(void)
 
     if (time_valid) {
         ESP_ERROR_CHECK(stats_init(&s_state.stats, now));
-        ESP_ERROR_CHECK_WITHOUT_ABORT(stats_add_sample(&s_state.stats, now,
-                                                       sample.temperature_c, sample.humidity_pct));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(stats_add_sample_with_battery(
+            &s_state.stats, now, sample.temperature_c, sample.humidity_pct,
+            battery_voltage * 1000.0f));
     }
     if (s_state.samples_since_update < UINT32_MAX) {
         ++s_state.samples_since_update;
@@ -336,8 +352,9 @@ void app_main(void)
     }
     const float dew = dew_point(sample.temperature_c, sample.humidity_pct);
 
-    const uint32_t update_multiplier =
-        CONFIG_RHT_UPDATE_FREQ <= 1 ? 1U : (uint32_t)CONFIG_RHT_UPDATE_FREQ;
+    const uint32_t configured_update_freq = settings_get_update_freq();
+    const uint32_t update_multiplier = configured_update_freq <= 1 ?
+        1U : configured_update_freq;
     const bool should_transmit = network_is_configured() &&
                                  s_state.samples_since_update >= update_multiplier;
 
@@ -375,20 +392,39 @@ void app_main(void)
                 }
             }
         }
+        const esp_app_desc_t *app = esp_app_get_description();
         const bool discovery_due = !is_time_valid(s_state.last_discovery) ||
                                    now < s_state.last_discovery ||
-                                   now - s_state.last_discovery >= 24 * 3600;
+                                   now - s_state.last_discovery >= 24 * 3600 ||
+                                   strcmp(s_state.discovery_version, app->version) != 0;
+        strlcpy(measurement.installed_version, app->version,
+                sizeof(measurement.installed_version));
+        strlcpy(measurement.latest_version, app->version,
+                sizeof(measurement.latest_version));
+        if (discovery_due) {
+            (void)ota_get_latest_version(measurement.latest_version,
+                                          sizeof(measurement.latest_version));
+        }
         if (network_publish(&measurement, discovery_due) == ESP_OK) {
             s_state.samples_since_update = 0;
             if (discovery_due) {
                 s_state.last_discovery = now;
+                strlcpy(s_state.discovery_version, app->version,
+                        sizeof(s_state.discovery_version));
             }
         } else {
             ESP_LOGW(TAG, "MQTT publish failed; it will be retried on the next wake");
         }
         if (network_take_ota_request()) {
-            if (xTaskCreate(ota_task, "ota_task", 12288, NULL, 5, NULL) != pdPASS) {
+            TaskHandle_t ota_handle = NULL;
+            TaskHandle_t waiter = xTaskGetCurrentTaskHandle();
+            if (xTaskCreate(ota_task, "ota_task", 12288, waiter, 5,
+                            &ota_handle) != pdPASS) {
                 ESP_LOGE(TAG, "cannot start OTA task");
+            } else {
+                /* Keep Wi-Fi alive until the OTA task has finished. The
+                 * normal end-of-cycle cleanup must not race the TLS download. */
+                ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             }
         }
     }
@@ -396,7 +432,7 @@ void app_main(void)
     float delta = 0;
     const char *delta_label = "DELTA";
     const bool delta_valid = time_valid &&
-        stats_delta_reference(&s_state.stats, s_state.page, now,
+        stats_delta_reference(&s_state.stats, 0, now,
                               sample.temperature_c, &delta, &delta_label);
     epaper_view_t view = {
         .timestamp = now,
@@ -413,10 +449,16 @@ void app_main(void)
         .delta_valid = delta_valid,
         .time_valid = time_valid,
         .wifi_connected = s_state.last_wifi_connected,
+        .page = s_state.page,
     };
-    if (time_valid) {
-        view.chart_count = stats_chart_series(&s_state.stats, s_state.page, now,
-                                              view.chart_values, EPAPER_CHART_MAX_POINTS);
+    if (time_valid && s_state.page == 1) {
+        for (uint8_t i = 0; i < 4; ++i) {
+            const char *ignored_label = NULL;
+            view.history_valid[i] = stats_delta_reference(&s_state.stats, i + 1U,
+                now, sample.temperature_c, &view.history_delta_c[i], &ignored_label);
+        }
+        view.chart_count = stats_battery_chart(&s_state.stats, now,
+                                               view.chart_values, EPAPER_CHART_MAX_POINTS);
     }
     ESP_ERROR_CHECK_WITHOUT_ABORT(epaper_show(&view));
 
