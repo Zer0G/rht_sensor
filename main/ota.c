@@ -1,6 +1,7 @@
 #include "ota.h"
 
 #include <ctype.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -81,15 +82,34 @@ static esp_err_t fetch_manifest(char *manifest, size_t manifest_size)
         .disable_auto_redirect = false,
         .max_redirection_count = 5,
     };
+    ESP_LOGI(TAG, "manifest URL: %s", CONFIG_RHT_OTA_MANIFEST_URL);
     esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (!client) return ESP_ERR_NO_MEM;
+    if (!client) {
+        ESP_LOGE(TAG, "manifest init failed: %s", esp_err_to_name(ESP_ERR_NO_MEM));
+        return ESP_ERR_NO_MEM;
+    }
     esp_err_t result = esp_http_client_open(client, 0);
-    if (result == ESP_OK) result = esp_http_client_fetch_headers(client);
+    ESP_LOGI(TAG, "manifest open: %s errno=%d", esp_err_to_name(result),
+             esp_http_client_get_errno(client));
+    if (result == ESP_OK) {
+        result = esp_http_client_fetch_headers(client);
+        ESP_LOGI(TAG, "manifest headers: %s status=%d errno=%d length=%" PRId64,
+                 esp_err_to_name(result), esp_http_client_get_status_code(client),
+                 esp_http_client_get_errno(client),
+                 esp_http_client_get_content_length(client));
+    }
+    char final_url[OTA_URL_MAX_SIZE];
+    if (esp_http_client_get_url(client, final_url, sizeof(final_url)) == ESP_OK) {
+        ESP_LOGI(TAG, "manifest final URL: %s", final_url);
+    }
     size_t used = 0;
     while (result == ESP_OK && used + 1U < manifest_size) {
         const int read = esp_http_client_read(client, manifest + used,
                                               (int)(manifest_size - used - 1U));
         if (read < 0) {
+            ESP_LOGE(TAG, "manifest read failed: read=%d errno=%d status=%d",
+                     read, esp_http_client_get_errno(client),
+                     esp_http_client_get_status_code(client));
             result = ESP_FAIL;
             break;
         }
@@ -99,6 +119,9 @@ static esp_err_t fetch_manifest(char *manifest, size_t manifest_size)
     if (result == ESP_OK && esp_http_client_get_status_code(client) != 200) {
         result = ESP_ERR_HTTP_BASE + esp_http_client_get_status_code(client);
     }
+    ESP_LOGI(TAG, "manifest result: %s status=%d bytes=%u errno=%d",
+             esp_err_to_name(result), esp_http_client_get_status_code(client),
+             (unsigned)used, esp_http_client_get_errno(client));
     manifest[used] = '\0';
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
