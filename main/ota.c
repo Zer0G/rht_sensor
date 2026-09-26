@@ -91,12 +91,20 @@ static esp_err_t fetch_manifest(char *manifest, size_t manifest_size)
     esp_err_t result = esp_http_client_open(client, 0);
     ESP_LOGI(TAG, "manifest open: %s errno=%d", esp_err_to_name(result),
              esp_http_client_get_errno(client));
-    if (result == ESP_OK) {
+    for (int redirect = 0; result == ESP_OK && redirect <= 5; ++redirect) {
         result = esp_http_client_fetch_headers(client);
+        const int status = esp_http_client_get_status_code(client);
         ESP_LOGI(TAG, "manifest headers: %s status=%d errno=%d length=%" PRId64,
-                 esp_err_to_name(result), esp_http_client_get_status_code(client),
-                 esp_http_client_get_errno(client),
+                 esp_err_to_name(result), status, esp_http_client_get_errno(client),
                  esp_http_client_get_content_length(client));
+        if (result != ESP_OK || status < 300 || status >= 400) break;
+        if (redirect == 5) {
+            result = ESP_ERR_HTTP_MAX_REDIRECT;
+            break;
+        }
+        result = esp_http_client_set_redirection(client);
+        ESP_LOGI(TAG, "manifest redirect %d: %s", redirect + 1,
+                 esp_err_to_name(result));
     }
     char final_url[OTA_URL_MAX_SIZE];
     if (esp_http_client_get_url(client, final_url, sizeof(final_url)) == ESP_OK) {
